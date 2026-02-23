@@ -295,6 +295,7 @@ DLG_OK      EQU 1
 DLG_CANCEL  EQU 0
 DLG_YES     EQU 1
 DLG_NO      EQU 0
+DLG_REPL_ALL EQU 2
 
 ; --- Framework state: dialog (fw_state offsets 10-11) ---
 FW_DLG_RESULT EQU 10           ; BYTE - dialog return code

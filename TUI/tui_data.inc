@@ -50,6 +50,9 @@ dlg_btn2:       RESB 14        ; Cancel/No button
 dlg_textbox:    RESB 18        ; textbox (input dialog only)
 dlg_label2:     RESB 14        ; second prompt label (input2 dialog)
 dlg_textbox2:   RESB 18        ; second textbox (input2 dialog)
+dlg_btn3:       RESB 14        ; third button (replace dialog)
+dlg_checkbox:   RESB 15        ; checkbox control (replace dialog)
+dlg_checkbox2:  RESB 15        ; second checkbox (replace dialog: In Selection)
 
 ; --- Dialog temp saves (used during struct building) ---
 dlg_save_title:  RESW 1

@@ -448,6 +448,60 @@ temp_editor:
     DB 0                        ; WIN_SCROLLY
 
 ; ============================================================================
+; Parse command-line filename from PSP
+; Returns: CF=0 if filename found (copied to ed_filename_buf), CF=1 if none
+; ============================================================================
+_parse_cmdline: PROC
+    ; Check command-line length at PSP:0080h
+    MOV SI, 0080h
+    LODSB                       ; AL = length byte, SI -> 0081h
+    OR AL, AL
+    JZ .no_file                 ; length = 0 → no args
+
+    MOV CL, AL
+    XOR CH, CH                  ; CX = tail length
+
+    ; Skip leading spaces
+.skip_spaces:
+    JCXZ .no_file               ; ran out of chars
+    LODSB
+    DEC CX
+    CMP AL, 20h
+    JE .skip_spaces
+
+    ; AL has first non-space char, SI points past it
+    DEC SI                      ; back up to first non-space
+    INC CX
+
+    ; Copy filename to ed_filename_buf until space or CR
+    MOV DI, ed_filename_buf
+.copy_loop:
+    JCXZ .done_copy
+    LODSB
+    DEC CX
+    CMP AL, 0Dh                ; CR = end
+    JE .done_copy
+    CMP AL, 20h                ; space = end
+    JE .done_copy
+    MOV [DI], AL
+    INC DI
+    JMP .copy_loop
+
+.done_copy:
+    ; Null-terminate
+    MOV BYTE [DI], 0
+    ; Check if we actually copied anything
+    CMP DI, ed_filename_buf
+    JE .no_file
+    CLC                         ; CF=0: filename found
+    RET
+
+.no_file:
+    STC                         ; CF=1: no filename
+    RET
+ENDP
+
+; ============================================================================
 ; Entry Point
 ; ============================================================================
 
@@ -468,6 +522,16 @@ main:
     MOV CX, ED_BUFSIZE
     CALL gap_init
     CALL undo_init
+
+    ; Check for command-line filename
+    CALL _parse_cmdline
+    JC _no_cmdline_file
+    MOV DX, ed_filename_buf
+    CALL _editor_load_file
+    JC _no_cmdline_file
+    MOV WORD [ed_state + ED_FILENAME], ed_filename_buf
+    MOV WORD [temp_editor + WIN_TITLE], ed_filename_buf
+_no_cmdline_file:
 
     ; Set up menu bar
     MOV WORD [fw_state + FW_MENUBAR], menubar_data
