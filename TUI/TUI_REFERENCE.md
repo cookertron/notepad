@@ -78,16 +78,16 @@ Include order matters. Use `INCLUDE tui.inc` to get everything.
 
 | # | File | Role | Lines |
 |---|------|------|-------|
-| 1 | `tui_const.inc` | EQU constants: screen, window, control, flags, colors, keys, structs | 342 |
+| 1 | `tui_const.inc` | EQU constants: screen, window, control, flags, colors, keys, structs | 346 |
 | 2 | `tui_macros.inc` | PushAll/PopAll macros (IRP-based) | 17 |
-| 3 | `tui_video.inc` | Shadow buffer primitives: init, clear, blit, putchar, putstr, hline, fill_rect, darken | 299 |
+| 3 | `tui_video.inc` | Shadow buffer primitives: init, clear, blit, putchar, putstr, hline, fill_rect, darken | 300 |
 | 4 | `tui_window.inc` | Window create/draw/compose/close, z-order cycle, keyboard move | 550 |
-| 5 | `tui_control.inc` | Control framework: draw, focus, activate, key handlers for all 8 types, scroll bars | 2546 |
-| 6 | `tui_menu.inc` | Menu bar + dropdown: draw, keyboard state machine, hotkeys, activate entry | 887 |
-| 7 | `tui_mouse.inc` | Mouse: init, poll, cursor, hit test, dispatch, drag, resize, control click, scroll bar drag | 2129 |
-| 8 | `tui_event.inc` | Key dispatch, modal dispatch, main event loop (`tui_run`) | 288 |
-| 9 | `tui_dialog.inc` | Standard dialogs: msgbox, confirm, input, input2, file selector | 980 |
-| 10 | `tui_data.inc` | Data reservations: row offsets, shadow_buf, fw_state, tables, dialog scratch | 80 |
+| 5 | `tui_control.inc` | Control framework: draw, focus, activate, key handlers for all 9 types, scroll bars | 2572 |
+| 6 | `tui_menu.inc` | Menu bar + dropdown: draw, keyboard state machine, hotkeys, activate entry | 1068 |
+| 7 | `tui_mouse.inc` | Mouse: init, poll, cursor, hit test, dispatch, drag, resize, control click, scroll bar drag, control drag | 2252 |
+| 8 | `tui_event.inc` | Key dispatch, modal dispatch, main event loop (`tui_run`) | 276 |
+| 9 | `tui_dialog.inc` | Standard dialogs: msgbox, confirm, input, input2, file selector with drive dropdown | 1277 |
+| 10 | `tui_data.inc` | Data reservations: row offsets, shadow_buf, fw_state, tables, dialog scratch, drive data | 90 |
 | 11 | `tui.inc` | Master include (includes all above in correct order) | 16 |
 
 ---
@@ -268,7 +268,7 @@ Menu bar state machine: **inactive** (SEL=FFh) -> **bar-active** (SEL=0..N) ->
 | 8 | `MI_HOTIDX` | BYTE | Index of hotkey char in `MI_TEXT` (FFh = none) |
 | 9 | `MI_ALTKEY` | BYTE | Alt+key scan code that opens this dropdown (0 = none) |
 
-### Menu Dropdown Entry (6 bytes)
+### Menu Dropdown Entry (10 bytes)
 
 | Offset | Name | Size | Description |
 |--------|------|------|-------------|
@@ -276,6 +276,9 @@ Menu bar state machine: **inactive** (SEL=FFh) -> **bar-active** (SEL=0..N) ->
 | 2 | `MDE_HANDLER` | WORD | Callback pointer (0 = no action) |
 | 4 | `MDE_HOTIDX` | BYTE | Index of hotkey char in entry text (FFh = none) |
 | 5 | `MDE_HOTKEY` | BYTE | ASCII char that activates this entry (0 = none) |
+| 6 | `MDE_ACCEL` | WORD | Pointer to accelerator display text (0 = none) |
+| 8 | `MDE_ACCELKEY` | BYTE | Alt+key scan code for global dispatch (0 = display only) |
+| 9 | `MDE_PAD` | BYTE | Reserved (0) |
 
 ### Mouse State (`mouse_state`, 16 bytes)
 
@@ -343,6 +346,7 @@ Menu bar state machine: **inactive** (SEL=FFh) -> **bar-active** (SEL=0..N) ->
 | `CTYPE_DROPDOWN` | 6 | Combo box with popup list |
 | `CTYPE_LISTBOX` | 7 | Scrolling selection list |
 | `CTYPE_TEXTVIEW` | 8 | Read-only scrollable text viewer |
+| `CTYPE_EDITOR` | 9 | Gap-buffer text editor (defined in `editor_const.inc`, dispatched by TUI) |
 
 ### Control Flags (`CTRLF_*`)
 
@@ -512,6 +516,7 @@ DOS text attributes: high nibble = background (0-7), low nibble = foreground (0-
 | `MSF_RESIZING` | 04h | Window resize in progress |
 | `MSF_BTN_DOWN` | 08h | Left button currently held |
 | `MSF_SB_DRAG` | 10h | Scroll bar thumb drag in progress |
+| `MSF_CTRL_DRAG` | 20h | Control-level drag in progress (e.g., text selection) |
 
 ### Hit Test Results (`HIT_*`)
 
@@ -542,7 +547,7 @@ DOS text attributes: high nibble = background (0-7), low nibble = foreground (0-
 | `DLG_BTN_YN_W` | 8 | Width of `[ Yes ]` / `[ No ]` buttons |
 | `DLG_BTN_CAN_W` | 10 | Width of `[ Cancel ]` button |
 | `DLG_BTN_GAP` | 2 | Gap between buttons |
-| `DLG_FILE_MAXENT` | 32 | Max directory entries in file dialog |
+| `DLG_FILE_MAXENT` | 128 | Max directory entries in file dialog |
 | `DLG_FILE_NAMELEN` | 14 | Bytes per name slot (13 chars + backslash) |
 
 ---
@@ -748,6 +753,15 @@ scroll bars. Two-pass logic determines bar visibility.
 - **Input:** BX = control pointer, DH = abs row, DL = abs col, CH = focused flag
 - **Preserves:** BX, DI, DH, DL
 
+#### `tui_ctrl_draw_editor`
+Draw the editor control: renders gap buffer content with cursor highlighting,
+text selection, auto-hiding vertical scroll bar, and a status bar on the last
+row showing line/column position, modified flag, and buffer free space indicators.
+Defined in `editor_ctrl.inc`, called via TUI dispatch.
+
+- **Input:** BX = control pointer, DH = abs row, DL = abs col, CH = focused flag
+- **Preserves:** BX, DI
+
 #### `tui_ctrl_focus_next`
 Cycle focus to the next focusable+enabled control in the linked list. Wraps
 around to the first control after reaching the end.
@@ -766,7 +780,7 @@ select radio button, or call handler for listbox/textview.
 
 #### `tui_ctrl_handle_key`
 Route a keypress to the focused control's key handler (TextBox, Dropdown,
-Listbox, or TextViewer). Non-handled keys fall through.
+Listbox, TextViewer, or Editor). Non-handled keys fall through.
 
 - **Input:** AH = key type, AL = char/scan
 - **Output:** CF=0 if handled, CF=1 if not handled
@@ -841,20 +855,25 @@ selection color takes priority).
 - **Clobbers:** none (all saved via PushAll)
 
 #### `tui_menu_draw_dropdown`
-Draw the open dropdown menu box with entries, border, and shadow. A hotkey
-highlight pass draws each entry's hotkey letter in `CLR_MENU_DD_HOTKEY`
-(skipping the selected entry, where selection color takes priority).
+Draw the open dropdown menu box with entries, border, and shadow. Three
+rendering passes after the entry text: (1) accelerator text pass draws
+right-aligned `MDE_ACCEL` strings (e.g., "Ctrl+S", "Alt+X") using the
+entry's normal or selected attribute; (2) hotkey highlight pass draws each
+entry's hotkey letter in `CLR_MENU_DD_HOTKEY` (skipping the selected entry,
+where selection color takes priority); (3) shadow pass.
 
 - **Input:** none (reads `FW_MENUBAR` from `fw_state`)
 - **Output:** none
 - **Clobbers:** none (all saved via PushAll)
 
 #### `tui_menu_handle_key`
-Key handler for the menu bar state machine. When inactive, intercepts F10 and
-Alt+key shortcuts (`MI_ALTKEY`). When bar-active, handles Left/Right/Down/
-Enter/Escape and Alt+key. When dropdown-open, handles Up/Down/Left/Right/
-Enter/Escape, Alt+key to switch menus, and single-letter hotkeys (`MDE_HOTKEY`)
-to activate entries directly.
+Key handler for the menu bar state machine. When inactive, intercepts F10,
+Alt+key shortcuts (`MI_ALTKEY`) to open dropdowns, and global accelerator
+keys (`MDE_ACCELKEY`) to dispatch entry handlers directly without opening
+the menu. When bar-active, handles Left/Right/Down/Enter/Escape and Alt+key.
+When dropdown-open, handles Up/Down/Left/Right/Enter/Escape, Alt+key to
+switch menus, and single-letter hotkeys (`MDE_HOTKEY`) to activate entries
+directly.
 
 - **Input:** AH = key type, AL = char/scan
 - **Output:** CF=0 if handled (key consumed), CF=1 if not handled
@@ -875,6 +894,7 @@ menu (resets SEL/OPEN/DDSEL to inactive state).
 | `_mde_index_to_offset` | Convert dropdown entry index (AL) to byte offset (AX = AL * MDE_SIZE). Clobbers: AH |
 | `_mhk_check_alt_key` | Match scan code (AL) against menu items' `MI_ALTKEY` fields. CF=0 + BL=index on match, CF=1 if none |
 | `_mhk_check_dd_hotkey` | Match ASCII char (AL, case-insensitive) against current dropdown's `MDE_HOTKEY` fields. CF=0 + BL=index on match, CF=1 if none |
+| `_mhk_check_accel` | Match scan code (AL) against all `MDE_ACCELKEY` fields across all menus. CF=0 if matched (handler called via RET-trampoline), CF=1 if no match. Clobbers: BX, AH, CX, DX, SI |
 
 ---
 
@@ -973,6 +993,16 @@ Close the menu bar if active (reset SEL/OPEN/DDSEL to inactive).
 Handle mouse hover when menu is open. If cursor moves to a different menu bar
 item, switches the dropdown. If cursor moves over a dropdown entry, highlights it.
 
+#### `tui_mouse_on_ctrl_drag`
+Dispatch drag events to the control type's drag handler. Called each frame
+while `MSF_CTRL_DRAG` is active and the left button is held. Reads the control
+pointer from `MS_PRESSED` and dispatches by `CTRL_TYPE`. On button release,
+the flag is cleared automatically by `tui_mouse_dispatch`.
+
+- **Input:** none (reads `MS_PRESSED` from `mouse_state`)
+- **Output:** none
+- **Currently supports:** `CTYPE_EDITOR` (calls `tui_ed_mouse_drag`)
+
 #### Scroll Bar Mouse Functions
 
 | Function | Description |
@@ -997,20 +1027,22 @@ Non-blocking keyboard poll using INT 21h function 06h.
 Handle a keypress. Dispatch order:
 1. Modal dialog dispatch (if modal active)
 2. Menu handler (consumes all keys when menu active)
-3. Control handler (TextBox, Dropdown, Listbox, TextViewer)
+3. Control handler (TextBox, Dropdown, Listbox, TextViewer, Editor)
 4. Tab -> focus cycle (then window cycle if only 1 focusable)
 5. Enter/Space -> activate focused control
 6. Ctrl+Arrows -> move window
 7. F6 -> cycle windows
-8. q/Q/Escape -> quit (`FW_RUNNING = 0`)
+
+The framework does **not** provide a built-in quit key. Applications must
+handle exit themselves (e.g., via a menu entry that sets `FW_RUNNING = 0`).
 
 - **Input:** AH = key type, AL = char/scan
-- **Output:** May set `FW_RUNNING` to 0
+- **Output:** none
 
 #### `tui_modal_dispatch`
 Key dispatch for modal dialog mode. Only allows: control key handling, Tab
 (focus cycle within dialog only), Enter/Space (activate), Escape (cancel + close).
-Blocks q/Q quit, menu access, and window cycling.
+Blocks menu access and window cycling.
 
 #### `tui_run`
 Main event loop. Performs initial compose+blit, then loops: poll keyboard,
@@ -1075,14 +1107,25 @@ Initial focus is on textbox1. Pre-populated buffers display existing text with
 cursor positioned at the end.
 
 #### `tui_dlg_file`
-Display a file selector dialog with directory listing, path display, OK, and
-Cancel buttons. Supports directory navigation (double-click or Enter on
-directory entries). Always includes `..\ ` for parent navigation.
+Display a file selector dialog with drive dropdown, directory listing, path
+display, OK, and Cancel buttons. The drive dropdown probes available drives
+(A-Z) via INT 21h IOCTL on each open and allows switching drives. Supports
+directory navigation (double-click or Enter on directory entries). Always
+includes `..\ ` for parent navigation. Maximum 128 directory entries.
 
 - **Input:** DI = title string ptr, BX = result buffer ptr, CL = max filename length
 - **Output:** AL = `DLG_OK` (1) or `DLG_CANCEL` (0).
   Buffer at BX contains selected filename if `DLG_OK`.
   CWD is left at the directory where the file was selected.
+
+**Interior layout** (12 rows, WIN_H=14 with border):
+```
+Row 0:  Drive: [C: v] \DIRNAME...
+Row 1-8: File listbox (8 rows, w=32)
+Row 10:  [  OK  ]   [ Cancel ]
+```
+
+**Control chain:** `dlg_label2` (Drive:) → `dlg_drive_dd` → `dlg_label` (path) → `dlg_listbox` → `dlg_btn1` → `dlg_btn2`
 
 #### `tui_dlg_run_modal`
 Internal: create dialog window from `dlg_tmpl`, set modal state, run nested
@@ -1096,8 +1139,11 @@ event loop, restore previous state on return.
 | Function | Description |
 |----------|-------------|
 | `tui_dlg_strlen` | Measure null-terminated string. Input: SI. Output: CX = length |
-| `tui_file_get_path` | Get CWD into `dlg_file_path` (via INT 21h/47h) |
+| `tui_file_get_path` | Get CWD into `dlg_file_path` as `\DIRNAME` (via INT 21h/47h) |
 | `tui_file_enumerate` | List directory into `dlg_file_*` buffers (via INT 21h/4Eh-4Fh) |
+| `tui_file_detect_drives` | Probe drives A-Z via INT 21h AX=4409h, fill `dlg_drive_*` buffers |
+| `_dlg_file_find_cur_drive` | Get current drive (AH=19h), search items array, return index in AL |
+| `dlg_file_drive_handler` | Dropdown commit handler: select disk, chdir root, re-enumerate |
 | `dlg_file_handle_sel` | Process listbox selection: chdir if directory, close if file |
 | `dlg_file_lb_handler` | Listbox Enter/click handler (calls `dlg_file_handle_sel`) |
 | `dlg_file_ok_handler` | OK button handler (reads listbox selection) |
@@ -1137,8 +1183,12 @@ Reserves all framework data areas:
 | `dlg_file_dta` | 43 bytes | DOS Disk Transfer Area |
 | `dlg_file_path` | 65 bytes | CWD display buffer |
 | `dlg_file_count` | 1 byte | Directory entry count |
-| `dlg_file_items` | 64 bytes | Item pointer array (32 x WORD) |
-| `dlg_file_names` | 448 bytes | Name storage (32 x 14 bytes) |
+| `dlg_file_items` | 256 bytes | Item pointer array (128 x WORD) |
+| `dlg_file_names` | 1792 bytes | Name storage (128 x 14 bytes) |
+| `dlg_drive_dd` | 21 bytes | Drive dropdown control struct |
+| `dlg_drive_count` | 1 byte | Number of detected drives |
+| `dlg_drive_items` | 52 bytes | Drive pointer array (26 x WORD) |
+| `dlg_drive_names` | 78 bytes | Drive name storage (26 x 3 bytes: "X:\\0") |
 
 ---
 

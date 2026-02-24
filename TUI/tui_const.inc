@@ -181,12 +181,15 @@ MI_HOTIDX    EQU 8            ; BYTE  - index of hotkey char in MI_TEXT (FFh = n
 MI_ALTKEY    EQU 9            ; BYTE  - Alt+key scan code (0 = none)
 MI_SIZE      EQU 10
 
-; --- Dropdown entry struct offsets (6 bytes) ---
-MDE_TEXT     EQU 0             ; WORD  - pointer to entry label string
-MDE_HANDLER  EQU 2             ; WORD  - callback pointer (0 = no action)
-MDE_HOTIDX   EQU 4             ; BYTE  - index of hotkey char in entry text (FFh = none)
-MDE_HOTKEY   EQU 5             ; BYTE  - ASCII char that activates this entry (0 = none)
-MDE_SIZE     EQU 6
+; --- Dropdown entry struct offsets (10 bytes) ---
+MDE_TEXT      EQU 0             ; WORD  - pointer to entry label string
+MDE_HANDLER   EQU 2             ; WORD  - callback pointer (0 = no action)
+MDE_HOTIDX    EQU 4             ; BYTE  - index of hotkey char in entry text (FFh = none)
+MDE_HOTKEY    EQU 5             ; BYTE  - ASCII char that activates this entry (0 = none)
+MDE_ACCEL     EQU 6             ; WORD  - pointer to accelerator display text (0 = none)
+MDE_ACCELKEY  EQU 8             ; BYTE  - Alt+key scan code for global dispatch (0 = none)
+MDE_PAD       EQU 9             ; BYTE  - reserved (0)
+MDE_SIZE      EQU 10
 
 ; --- Menu colors ---
 CLR_MENUBAR     EQU 70h       ; black on light gray (normal bar)
@@ -310,7 +313,7 @@ DLG_BTN_CAN_W EQU 10           ; button width for [ Cancel ]
 DLG_BTN_GAP   EQU 2            ; gap between buttons
 
 ; --- File dialog ---
-DLG_FILE_MAXENT  EQU 32          ; max directory entries
+DLG_FILE_MAXENT  EQU 128         ; max directory entries
 DLG_FILE_NAMELEN EQU 14          ; bytes per name slot (13 chars + backslash)
 
 ; --- Scroll bar characters (CP437) ---

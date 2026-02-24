@@ -80,6 +80,10 @@ tui_blit: PROC
     PUSH DI
     PUSH ES
 
+    ; Hide hardware mouse cursor before writing VRAM
+    MOV AX, 0002h
+    INT 33h
+
     MOV AX, VRAM_SEG
     MOV ES, AX
     MOV SI, shadow_buf
@@ -87,6 +91,10 @@ tui_blit: PROC
     MOV CX, SCR_CELLS
     CLD
     REP MOVSW
+
+    ; Show hardware mouse cursor after VRAM update
+    MOV AX, 0001h
+    INT 33h
 
     POP ES
     POP DI

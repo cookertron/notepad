@@ -105,7 +105,7 @@ Added toggle and exclusive-selection controls.
 Added a full menu bar system with dropdown menus as a separate overlay layer.
 
 **Added:**
-- Menu bar struct (8 bytes), menu item struct (10 bytes), dropdown entry (6 bytes)
+- Menu bar struct (8 bytes), menu item struct (10 bytes), dropdown entry (10 bytes)
 - `tui_menu_draw_bar` — draw menu bar on row 0
 - `tui_menu_draw_dropdown` — draw open dropdown with border + shadow
 - `tui_menu_handle_key` — state machine: inactive / bar-active / dropdown-open
@@ -362,8 +362,8 @@ Extended menu item struct from 8 to 10 bytes to support Alt+key bar hotkeys.
 
 ### Phase 9b (Dropdown Entry Hotkeys)
 
-Extended dropdown entry struct from 4 to 6 bytes to support single-letter
-hotkeys within open dropdown menus.
+Extended dropdown entry struct from 4 to 6 bytes (later to 10, see Phase 13)
+to support single-letter hotkeys within open dropdown menus.
 
 **Added:**
 - `MDE_HOTIDX` (BYTE, offset 4) — index of hotkey character in entry text (FFh = none)
@@ -375,3 +375,95 @@ hotkeys within open dropdown menus.
 - `CLR_MENU_DD_HOTKEY` color constant (74h)
 
 **Files modified:** `tui_const.inc`, `tui_menu.inc`
+
+---
+
+## Phase 12 — Drive Selection Dropdown in File Dialog
+
+Added a drive dropdown to the file selector dialog, allowing users to switch
+between available drives (A:, C:, D:, etc.). Also increased the maximum
+directory entry limit from 32 to 128.
+
+**Added:**
+- `tui_file_detect_drives` — probe drives A-Z via INT 21h AX=4409h (IOCTL check block device), populate `dlg_drive_items[]` and `dlg_drive_names[]`
+- `_dlg_file_find_cur_drive` — get current drive (AH=19h), linear search items array, return index
+- `dlg_file_drive_handler` — dropdown commit handler: select disk (AH=0Eh), chdir root (AH=3Bh "\\"), re-enumerate files, update listbox and path display
+- Drive data buffers: `dlg_drive_dd` (21B dropdown control), `dlg_drive_count` (1B), `dlg_drive_items` (52B), `dlg_drive_names` (78B)
+- `dlg_str_drive` ("Drive:") and `dlg_file_rootdir` ("\\") static strings
+
+**Modified:**
+- `tui_dlg_file` — row 0 now has "Drive:" label (col 0), drive dropdown (col 7, w=5), and path label (col 13, w=19). Control chain: `dlg_label2 → dlg_drive_dd → dlg_label → dlg_listbox → btn1 → btn2`. WIN_FIRST = `dlg_label2`
+- `DLG_FILE_MAXENT` — increased from 32 to 128 (with corresponding buffer expansions: items 64→256 bytes, names 448→1792 bytes)
+
+**Files modified:** `tui_const.inc`, `tui_data.inc`, `tui_dialog.inc`
+
+---
+
+## Phase 13 — Menu Accelerator Keys (Display + Global Dispatch)
+
+Extended dropdown entries with optional accelerator key display and global
+shortcut dispatch. Accelerator text (e.g., "Ctrl+S", "Alt+X") is rendered
+right-aligned in dropdown entries. Non-zero `MDE_ACCELKEY` values enable
+global dispatch: the entry's handler is called directly without opening the
+menu, triggered by the corresponding Alt+key scan code from the INACTIVE state.
+
+**Added:**
+- `MDE_ACCEL` (WORD, offset 6) — pointer to accelerator display string (0 = none)
+- `MDE_ACCELKEY` (BYTE, offset 8) — Alt+key scan code for global dispatch (0 = display only)
+- `MDE_PAD` (BYTE, offset 9) — reserved padding byte
+- Accelerator text rendering pass in `tui_menu_draw_dropdown` — draws right-aligned text using the entry's normal or selected attribute
+- `_mhk_check_accel` — scans all `MDE_ACCELKEY` fields across all menus, calls matching handler via RET-trampoline
+
+**Modified:**
+- `MDE_SIZE` — increased from 6 to 10 bytes
+- `tui_menu_handle_key` INACTIVE state — after `_mhk_check_alt_key` fails, tries `_mhk_check_accel` before falling through to not-handled
+
+**Files modified:** `tui_const.inc`, `tui_menu.inc`
+
+---
+
+## Phase 6b — Control-Level Drag Infrastructure (MSF_CTRL_DRAG)
+
+Added a generic control-level drag mechanism, mirroring the existing
+`MSF_SB_DRAG` pattern. This allows individual control types to receive
+continuous drag events while the mouse button is held.
+
+**Added:**
+- `MSF_CTRL_DRAG` (20h) flag in mouse state flags
+- `tui_mouse_on_ctrl_drag` — dispatcher that reads `MS_PRESSED` control pointer and calls the appropriate control-type drag handler each frame while `MSF_CTRL_DRAG` is active and button held
+- Integration into `tui_mouse_dispatch`: on button-held, checks `MSF_CTRL_DRAG` before other drag types; on button-release, clears the flag
+
+**Files modified:** `tui_const.inc`, `tui_mouse.inc`
+
+---
+
+## Phase 9 — Quit Behavior Change
+
+Removed the default `q`/`Q`/`Escape` quit behavior from `tui_dispatch_key`.
+The framework no longer provides a built-in quit mechanism; applications must
+handle exit themselves (e.g., via a menu entry or control handler that sets
+`FW_RUNNING = 0`). This prevents accidental quits when typing in text controls.
+
+**Modified:**
+- `tui_dispatch_key` normal key handler — removed `q`, `Q`, `KEY_ESCAPE` checks that set `FW_RUNNING = 0`
+
+**Files modified:** `tui_event.inc`
+
+---
+
+## Phase 14 — CTYPE_EDITOR Dispatch in TUI Framework
+
+Extended the TUI control dispatch to support `CTYPE_EDITOR` (9), an
+application-defined control type for the notepad editor. The control type
+constant and editor state struct are defined in `editor_const.inc` (outside
+the TUI framework), but the TUI dispatch tables were extended to call the
+editor's draw, key, mouse press, scroll bar drag, and control drag handlers.
+
+**Added:**
+- `CTYPE_EDITOR` (9) dispatch in `tui_ctrl_draw_all` → calls `tui_ctrl_draw_editor`
+- `CTYPE_EDITOR` dispatch in `tui_ctrl_handle_key` → calls `tui_ed_handle_key`
+- `CTYPE_EDITOR` dispatch in `tui_mouse_on_press` interior handler → calls `tui_ed_mouse_press`
+- `CTYPE_EDITOR` dispatch in `tui_mouse_on_sb_drag` → WORD-sized scroll math for editor (vs BYTE for listbox/textview)
+- `CTYPE_EDITOR` dispatch in `tui_mouse_on_ctrl_drag` → calls `tui_ed_mouse_drag`
+
+**Files modified:** `tui_control.inc`, `tui_mouse.inc`

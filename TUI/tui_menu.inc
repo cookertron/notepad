@@ -326,6 +326,92 @@ tui_menu_draw_dropdown: PROC
 .dd_entries_done:
     POP DX                      ; restore original position
 
+    ; --- Accelerator text pass ---
+    ; Draw right-aligned accel text (e.g., "Ctrl+S") for each entry
+    PUSH DX
+    XOR CH, CH                 ; CH = entry index
+.dd_acc_loop:
+    CMP CH, [BX + MI_ECOUNT]
+    JAE .dd_acc_done
+
+    PUSH AX
+    MOV AL, CH
+    CALL _mde_index_to_offset  ; AX = index * MDE_SIZE
+
+    ; Save MI_X and MI_DDW before reassigning BX
+    MOV DL, [BX + MI_X]
+    MOV CL, [BX + MI_DDW]
+
+    PUSH BX                    ; save menu item ptr
+    MOV BX, [BX + MI_ENTRIES]
+    ADD BX, AX                 ; BX = entry ptr
+
+    ; Skip if MDE_ACCEL == 0
+    CMP WORD [BX + MDE_ACCEL], 0
+    JZ .dd_acc_skip
+
+    ; Get accel string length
+    PUSH SI
+    PUSH CX
+    MOV SI, [BX + MDE_ACCEL]
+    XOR CX, CX
+.dd_acc_strlen:
+    CMP BYTE [SI], 0
+    JZ .dd_acc_strlen_done
+    INC SI
+    INC CX
+    JMP .dd_acc_strlen
+.dd_acc_strlen_done:
+    ; CX = accel string length (CL = len, CH = 0)
+    ; Compute column: MI_X + 1 + MI_DDW - accel_len
+    POP AX                     ; AX = saved CX (AL=MI_DDW, AH=entry_index)
+    MOV CH, AH                 ; restore entry index (clobbered by strlen)
+    PUSH CX                    ; save CL=accel_len, CH=entry_index
+    MOV DH, 2
+    ADD DH, CH                 ; row = 2 + entry index
+    ; DL = MI_X already
+    ADD DL, AL                 ; DL = MI_X + MI_DDW
+    INC DL                     ; DL = MI_X + MI_DDW + 1
+    SUB DL, CL                ; DL = MI_X + MI_DDW + 1 - accel_len
+
+    ; Select attr: highlighted if selected
+    MOV AH, CLR_MENU_DD
+    CMP CH, [DI + MBAR_DDSEL]
+    JNZ .dd_acc_attr_ok
+    MOV AH, CLR_MENU_DDSEL
+.dd_acc_attr_ok:
+
+    ; Draw the accel string char by char
+    MOV SI, [BX + MDE_ACCEL]
+    POP CX                     ; CX = accel_len
+.dd_acc_draw:
+    OR CL, CL
+    JZ .dd_acc_draw_done
+    MOV AL, [SI]
+    CALL tui_putchar
+    INC DL
+    INC SI
+    DEC CL
+    JMP .dd_acc_draw
+.dd_acc_draw_done:
+    POP SI                     ; restore SI
+    JMP .dd_acc_next
+
+.dd_acc_skip:
+    POP BX                     ; restore menu item ptr
+    POP AX
+    INC CH
+    JMP .dd_acc_loop
+
+.dd_acc_next:
+    POP BX                     ; restore menu item ptr
+    POP AX
+    INC CH
+    JMP .dd_acc_loop
+
+.dd_acc_done:
+    POP DX
+
     ; --- Hotkey highlight pass ---
     ; Overwrite one char per entry with CLR_MENU_DD_HOTKEY attr
     PUSH DX
@@ -446,9 +532,16 @@ tui_menu_handle_key: PROC
 .mhk_inactive_ext:
     CMP AL, KEY_F10
     JZ .mhk_inactive_f10
-    ; Try Alt+key match
+    ; Try Alt+key match (opens menu dropdown)
     CALL _mhk_check_alt_key
+    JNC .mhk_inactive_alt_matched
+    ; Try global accelerator match (calls handler directly)
+    CALL _mhk_check_accel
     JC .mhk_not_handled
+    ; Accel handler was called, key consumed
+    CLC
+    JMP .mhk_ret
+.mhk_inactive_alt_matched:
     ; Match: BL = item index → activate + open dropdown
     MOV [DI + MBAR_SEL], BL
     MOV BYTE [DI + MBAR_OPEN], 1
@@ -839,7 +932,95 @@ _mhk_check_dd_hotkey: PROC
 ENDP
 
 ; ----------------------------------------------------------------------------
-; tui_menu_activate_entry - Execute selected dropdown entry's handler
+; _mhk_check_accel - Match scan code against all MDE_ACCELKEY fields
+; Input:  AL = scan code (extended key), DI = menu bar ptr
+; Output: CF=0 if matched (handler called via trampoline), CF=1 if no match
+; Clobbers: BX, AH, CX, DX, SI
+; ----------------------------------------------------------------------------
+_mhk_check_accel: PROC
+    PUSH CX
+    PUSH SI
+    PUSH DX
+
+    ; Save scan code to memory (AL clobbered by MUL in index_to_offset)
+    MOV [.ca_scancode], AL
+
+    MOV SI, [DI + MBAR_ITEMS]  ; SI = menu items array base
+    XOR DL, DL                 ; DL = menu item index
+
+.ca_mi_loop:
+    CMP DL, [DI + MBAR_COUNT]
+    JAE .ca_no_match
+
+    ; Get menu item pointer: SI + DL * MI_SIZE
+    PUSH AX
+    MOV AL, DL
+    CALL _mi_index_to_offset   ; AX = item offset
+    MOV BX, SI
+    ADD BX, AX                 ; BX = menu item ptr
+    MOV CL, [BX + MI_ECOUNT]  ; CL = entry count
+    MOV WORD [.ca_entries_tmp], BX  ; save MI ptr (need MI_ENTRIES from it)
+    POP AX
+
+    ; Loop entries for this menu item
+    XOR DH, DH                 ; DH = entry index
+.ca_mde_loop:
+    CMP DH, CL
+    JAE .ca_next_mi
+
+    ; Get entry pointer
+    PUSH AX
+    MOV AL, DH
+    CALL _mde_index_to_offset  ; AX = entry offset
+    MOV BX, [.ca_entries_tmp]
+    MOV BX, [BX + MI_ENTRIES] ; BX = entries array base
+    ADD BX, AX                 ; BX = entry ptr
+    POP AX
+
+    ; Check MDE_ACCELKEY against saved scan code
+    MOV AL, [.ca_scancode]
+    CMP [BX + MDE_ACCELKEY], AL
+    JZ .ca_found
+
+    INC DH
+    JMP .ca_mde_loop
+
+.ca_next_mi:
+    INC DL
+    JMP .ca_mi_loop
+
+.ca_found:
+    ; BX = matching entry ptr, get handler
+    MOV AX, [BX + MDE_HANDLER]
+    OR AX, AX
+    JZ .ca_no_match            ; no handler → treat as no match
+
+    ; Call handler via RET-trampoline
+    MOV WORD [ctrl_dispatch_addr], AX
+    POP DX
+    POP SI
+    POP CX
+    ; Push return address, then handler address, then RET
+    MOV AX, .ca_after_call
+    PUSH AX
+    MOV AX, [ctrl_dispatch_addr]
+    PUSH AX
+    RET                         ; jumps to handler
+
+.ca_after_call:
+    CLC
+    RET
+
+.ca_no_match:
+    STC
+    POP DX
+    POP SI
+    POP CX
+    RET
+
+.ca_scancode:    DB 0
+.ca_entries_tmp: DW 0
+ENDP
 ; Input: DI = menu bar ptr (reads MBAR_SEL, MBAR_DDSEL)
 ; ----------------------------------------------------------------------------
 tui_menu_activate_entry: PROC

@@ -83,7 +83,10 @@ main:
     INT 20h                 ; Clean exit to DOS
 ```
 
-Press `q`, `Q`, or `Escape` to quit the event loop and exit the program.
+The framework does not provide a built-in quit key. Applications must handle
+exit themselves (e.g., via a menu entry or control handler that sets
+`FW_RUNNING = 0`). To add a simple quit mechanism, handle the key in a
+window handler or control handler.
 
 ### What Happens
 
@@ -207,13 +210,13 @@ The event loop (`tui_run`) polls for keys and dispatches them in this order:
 
 1. **Menu handler** — if a menu is active, it consumes all keys
 2. **Control handler** — TextBox handles printable chars + editing keys;
-   Dropdown, Listbox, TextViewer handle arrows/Home/End/PgUp/PgDn
+   Dropdown, Listbox, TextViewer handle arrows/Home/End/PgUp/PgDn;
+   Editor handles typing, selection, clipboard, find/replace, undo/redo
 3. **Global keys:**
    - Tab → focus cycle (within window, then cycle windows)
    - F6 → cycle window z-order
    - Enter/Space → activate focused control
    - Ctrl+Arrows → move active window
-   - q/Q/Escape → quit
 
 ### Handler Callbacks
 
@@ -278,18 +281,30 @@ str_about:  DB 'About', 0
 str_file:   DB 'File', 0
 str_help:   DB 'Help', 0
 
-; Dropdown entries (6 bytes each: text_ptr + handler_ptr + hotkey)
+; Accelerator display strings (optional)
+str_acc_ctrl_n: DB 'Ctrl+N', 0
+str_acc_alt_q:  DB 'Alt+Q', 0
+
+; Dropdown entries (10 bytes each: text + handler + hotkey + accel)
 file_entries:
-    DW str_new,  file_new_handler       ; entry 0
+    DW str_new,  file_new_handler       ; entry 0: text + handler
     DB 0, 'N'                           ; MDE_HOTIDX=0 ('N'), MDE_HOTKEY='N'
+    DW str_acc_ctrl_n                   ; MDE_ACCEL: right-aligned display text
+    DB 0, 0                             ; MDE_ACCELKEY=0 (display only), MDE_PAD
     DW str_open, 0                      ; entry 1 (no handler)
     DB 0, 'O'                           ; MDE_HOTIDX=0 ('O'), MDE_HOTKEY='O'
+    DW 0                                ; MDE_ACCEL: no accelerator
+    DB 0, 0                             ; MDE_ACCELKEY, MDE_PAD
     DW str_quit, file_quit_handler      ; entry 2
     DB 0, 'Q'                           ; MDE_HOTIDX=0 ('Q'), MDE_HOTKEY='Q'
+    DW str_acc_alt_q                    ; MDE_ACCEL: "Alt+Q"
+    DB 10h, 0                           ; MDE_ACCELKEY=10h (Alt+Q scan), MDE_PAD
 
 help_entries:
     DW str_about, help_about_handler    ; entry 0
     DB 0, 'A'                           ; MDE_HOTIDX=0 ('A'), MDE_HOTKEY='A'
+    DW 0                                ; MDE_ACCEL: no accelerator
+    DB 0, 0                             ; MDE_ACCELKEY, MDE_PAD
 
 ; Menu items (10 bytes each)
 menu_items:
@@ -334,6 +349,15 @@ a dropdown or activates an entry, **Escape** closes. **Alt+key** shortcuts
 (defined in `MI_ALTKEY`) open dropdowns directly from any state. When a dropdown
 is open, pressing a hotkey letter (defined in `MDE_HOTKEY`) activates the
 matching entry immediately (case-insensitive).
+
+**Accelerator keys** (defined in `MDE_ACCELKEY`) are global shortcuts that
+trigger an entry's handler without opening the menu. These are dispatched when
+the menu is inactive — for example, `Alt+X` can trigger Exit directly. Set
+`MDE_ACCELKEY` to the Alt+key scan code for global dispatch, or 0 for
+display-only accelerators (where the shortcut is handled elsewhere, e.g.,
+`Ctrl+S` in an editor control). The `MDE_ACCEL` field points to a display
+string (e.g., `"Ctrl+S"`, `"Alt+X"`) that is rendered right-aligned in the
+dropdown entry. Set to 0 for no display.
 
 Mouse: Click on a menu bar item to open its dropdown, click an entry to activate.
 
@@ -564,10 +588,12 @@ file_buf: RESB 14
     ; Note: CWD may have changed to the selected directory
 ```
 
-The file dialog shows the current directory path, a scrollable list of files
-and subdirectories (with `..\ ` for parent navigation), and OK/Cancel buttons.
-Selecting a directory entry navigates into it; selecting a file copies its name
-to the buffer and closes with `DLG_OK`.
+The file dialog shows a drive selector dropdown, the current directory path,
+a scrollable list of files and subdirectories (with `..\ ` for parent
+navigation), and OK/Cancel buttons. The drive dropdown detects available drives
+at open time and allows switching between them. Selecting a directory entry
+navigates into it; selecting a file copies its name to the buffer and closes
+with `DLG_OK`. Up to 128 directory entries are supported.
 
 ---
 
@@ -627,7 +653,7 @@ cycles windows instead (same as F6).
 
 When a modal dialog is active (`FW_MODAL_WIN != FFh`):
 - Only the dialog window receives keyboard input
-- q/Q does NOT quit (only Escape cancels the dialog)
+- Escape cancels/closes the dialog
 - Tab only cycles focus within the dialog
 - Mouse clicks outside the dialog are blocked
 - The dialog runs its own nested `tui_run` loop
@@ -701,17 +727,11 @@ DB WINF_VISIBLE + WINF_BORDER + WINF_TITLE    ; GOOD
 DB WINF_VISIBLE | WINF_BORDER | WINF_TITLE    ; BAD - | not supported
 ```
 
-### TextBox and the 'q' Quit Key
-
-The `q` key (0x71) is a printable character. If a TextBox has focus, pressing
-`q` inserts the character instead of quitting. Use Escape to quit when a
-TextBox is focused, or Tab away from the TextBox first.
-
 ### Escape with Open Menus/Dropdowns
 
-Escape closes an open menu dropdown or combo popup, but does NOT quit the
-program. Press Escape again (when nothing is open) to quit. In modal dialogs,
-Escape cancels/closes the dialog.
+Escape closes an open menu dropdown or combo popup. In modal dialogs,
+Escape cancels/closes the dialog. The framework does not assign any default
+quit behavior to Escape — applications handle exit themselves.
 
 ### RESB/RESW in .COM Programs
 

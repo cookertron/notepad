@@ -23,11 +23,18 @@ ed_shift_held:     DB 0        ; cached shift state (nonzero if Shift pressed)
 ed_mouse_absrow:   DB 0        ; control absolute Y (cached on press for drag)
 ed_mouse_abscol:   DB 0        ; control absolute X
 ed_mouse_oldcur:   DW 0        ; old cursor offset before mouse press
+ed_needs_vbar:     DB 0        ; 1 if vertical scroll bar needed
+ed_clip_digits:    DB 0        ; digit count scratch for clip free
+ed_undo_digits:    DB 0        ; digit count scratch for undo free
+ed_gap_digits:     DB 0        ; digit count scratch for gap free
 
 ; Status bar strings
 str_status_ln:     DB ' Ln ', 0
 str_status_col:    DB ', Col ', 0
 str_status_mod:    DB '  Modified', 0
+str_status_clip:   DB 'Clip:', 0
+str_status_undo:   DB ' Undo:', 0
+str_status_free:   DB ' free', 0
 
 ; ----------------------------------------------------------------------------
 ; _ed_format_number - Format 16-bit unsigned number to decimal string
@@ -287,6 +294,16 @@ tui_ctrl_draw_editor: PROC
 
     ; Get editor state pointer
     MOV SI, [BX + CTRL_ED_STATE]
+
+    ; Check if vertical scroll bar needed: LINECOUNT > text_height
+    MOV BYTE [ed_needs_vbar], 0
+    XOR AH, AH
+    MOV AL, [ed_paint_height]
+    CMP [SI + ED_LINECOUNT], AX
+    JBE .no_vbar_setup
+    MOV BYTE [ed_needs_vbar], 1
+    DEC BYTE [ed_paint_width]       ; shrink text area by 1 for vbar column
+.no_vbar_setup:
     MOV BP, BX                  ; BP = control pointer (freed BX for temp use)
 
     ; Precompute selection range
@@ -508,7 +525,7 @@ tui_ctrl_draw_editor: PROC
     PUSH CX
     MOV AH, CLR_ED_STATUS
     MOV AL, 20h
-    MOV CL, [ed_paint_width]
+    MOV CL, [BP + CTRL_W]          ; full width (include vbar column)
     CALL tui_hline
     POP CX
     MOV DL, [ed_paint_origdl]
@@ -532,6 +549,147 @@ tui_ctrl_draw_editor: PROC
     MOV DI, str_status_mod
     CALL _ed_paint_string
 .status_done:
+
+    ; --- Right-aligned memory indicators: Clip:NNNN Undo:NNNN NNNN free ---
+
+    ; Phase 1: Count digit widths for all three values
+    ; Clip free = ED_BUFSIZE - ed_cliplen
+    MOV AX, ED_BUFSIZE
+    SUB AX, [ed_cliplen]
+    CALL _ed_format_number
+    MOV AX, ed_numbuf
+    ADD AX, 5
+    SUB AX, DI
+    MOV [ed_clip_digits], AL
+
+    ; Undo free = UNDO_BUFSIZE - undo_head
+    MOV AX, UNDO_BUFSIZE
+    SUB AX, [undo_head]
+    CALL _ed_format_number
+    MOV AX, ed_numbuf
+    ADD AX, 5
+    SUB AX, DI
+    MOV [ed_undo_digits], AL
+
+    ; Gap free = ED_GAPEND - ED_GAPSTART
+    MOV AX, [SI + ED_GAPEND]
+    SUB AX, [SI + ED_GAPSTART]
+    CALL _ed_format_number
+    MOV AX, ed_numbuf
+    ADD AX, 5
+    SUB AX, DI
+    MOV [ed_gap_digits], AL
+
+    ; Phase 2: Total width = clip_digits + undo_digits + gap_digits + 17
+    ; (5 "Clip:" + 6 " Undo:" + 1 " " + 5 " free" = 17 fixed chars)
+    XOR AH, AH
+    MOV AL, [ed_clip_digits]
+    ADD AL, [ed_undo_digits]
+    ADD AL, [ed_gap_digits]
+    ADD AL, 17
+    MOV CL, AL
+
+    ; Starting column = origdl + CTRL_W - total_width
+    MOV DL, [ed_paint_origdl]
+    ADD DL, [BP + CTRL_W]
+    SUB DL, CL
+
+    ; Re-set DH to status bar row
+    MOV DH, [ed_paint_origdh]
+    ADD DH, [ed_paint_height]
+
+    ; Phase 3: Paint left to right
+    MOV AH, CLR_ED_STATUS
+
+    ; Paint "Clip:"
+    MOV DI, str_status_clip
+    CALL _ed_paint_string
+
+    ; Paint clip free number
+    MOV AX, ED_BUFSIZE
+    SUB AX, [ed_cliplen]
+    CALL _ed_format_number
+    MOV AH, CLR_ED_STATUS
+    CALL _ed_paint_string
+
+    ; Paint " Undo:"
+    MOV DI, str_status_undo
+    CALL _ed_paint_string
+
+    ; Paint undo free number
+    MOV AX, UNDO_BUFSIZE
+    SUB AX, [undo_head]
+    CALL _ed_format_number
+    MOV AH, CLR_ED_STATUS
+    CALL _ed_paint_string
+
+    ; Paint " " separator before gap free
+    MOV AL, ' '
+    CALL tui_putchar
+    INC DL
+
+    ; Paint gap free number
+    MOV AX, [SI + ED_GAPEND]
+    SUB AX, [SI + ED_GAPSTART]
+    CALL _ed_format_number
+    MOV AH, CLR_ED_STATUS
+    CALL _ed_paint_string
+
+    ; Paint " free"
+    MOV DI, str_status_free
+    CALL _ed_paint_string
+
+    ; --- Draw vertical scroll bar if needed ---
+    CMP BYTE [ed_needs_vbar], 0
+    JZ .vbar_draw_done
+
+    ; Column = rightmost column of control (using BP = saved control ptr)
+    MOV DL, [ed_paint_origdl]
+    ADD DL, [BP + CTRL_W]
+    DEC DL
+    ; Top row = control origin
+    MOV DH, [ed_paint_origdh]
+    ; Bar height = text area height
+    MOV BL, [ed_paint_height]
+
+    ; Prepare params: AL=scroll, AH=visible, CL=total (all bytes)
+    CMP WORD [SI + ED_LINECOUNT], 255
+    JA .vbar_draw_scale
+
+    ; --- Direct (linecount <= 255) ---
+    MOV AL, [SI + ED_SCROLLY]      ; scroll (low byte, safe since total<=255)
+    MOV AH, [ed_paint_height]      ; visible = text area height
+    MOV CL, [SI + ED_LINECOUNT]    ; total (low byte)
+    JMP .vbar_draw_call
+
+.vbar_draw_scale:
+    ; --- Scaled (linecount > 255) ---
+    ; scroll_scaled = (ED_SCROLLY * 255) / ED_LINECOUNT
+    PUSH DX
+    MOV AX, [SI + ED_SCROLLY]
+    MOV CX, 255
+    MUL CX                         ; DX:AX = scrolly * 255
+    DIV WORD [SI + ED_LINECOUNT]   ; AX = scaled scroll
+    MOV [ed_needs_vbar], AL        ; temp store scroll_scaled
+    ; visible_scaled = (height * 255) / ED_LINECOUNT
+    XOR AH, AH
+    MOV AL, [ed_paint_height]
+    MOV CX, 255
+    MUL CX                         ; DX:AX = height * 255
+    DIV WORD [SI + ED_LINECOUNT]   ; AX = scaled visible
+    OR AL, AL
+    JNZ .vbar_vis_ok
+    MOV AL, 1                      ; minimum 1
+.vbar_vis_ok:
+    MOV AH, AL                     ; AH = visible_scaled
+    MOV AL, [ed_needs_vbar]        ; AL = scroll_scaled
+    MOV CL, 255                    ; total = 255
+    POP DX
+
+.vbar_draw_call:
+    CALL tui_draw_vscrollbar
+
+.vbar_draw_done:
     POP DI
     POP BX
     POP BP
@@ -824,6 +982,15 @@ tui_ed_handle_key: PROC
     MOV CL, [BX + CTRL_H]
     DEC CL
     MOV CH, [BX + CTRL_W]
+    ; Narrow width if vbar present (linecount > text height)
+    PUSH AX
+    XOR AH, AH
+    MOV AL, CL
+    CMP [SI + ED_LINECOUNT], AX
+    JBE .ev1_no_vbar
+    DEC CH
+.ev1_no_vbar:
+    POP AX
     CALL gap_ensure_visible
     POP SI
     ; Trigger redraw
@@ -941,6 +1108,186 @@ tui_ed_mouse_press: PROC
     MOV DH, AL
 .row_ok:
 
+    ; --- Check for vertical scroll bar click ---
+    PUSH SI                         ; save window ptr temporarily
+    MOV SI, [BX + CTRL_ED_STATE]
+    ; Vbar present when LINECOUNT > text height (CTRL_H - 1)
+    MOV AL, [BX + CTRL_H]
+    DEC AL
+    XOR AH, AH
+    CMP [SI + ED_LINECOUNT], AX
+    POP SI                          ; restore window ptr
+    JBE .no_vbar_click
+
+    ; Vbar present. Check if click is on vbar column.
+    MOV AL, [ed_mouse_abscol]
+    ADD AL, [BX + CTRL_W]
+    DEC AL                          ; AL = vbar column (absolute)
+    CMP DL, AL
+    JNE .no_vbar_click
+
+    ; Click IS on scroll bar. Compute relative row.
+    MOV AL, DH
+    SUB AL, [ed_mouse_absrow]       ; AL = relative row (0-based)
+    ; Check within vbar height (not on status bar)
+    MOV AH, [BX + CTRL_H]
+    DEC AH                          ; AH = vbar height = text area height
+    CMP AL, AH
+    JAE .no_vbar_click
+
+    ; AL = rel_row (0..height-1), AH = bar_height
+    ; Get editor state for scroll operations
+    PUSH SI
+    MOV SI, [BX + CTRL_ED_STATE]
+
+    ; Dispatch: row 0 = up arrow, row == height-1 = down arrow
+    TEST AL, AL
+    JZ .vbar_up
+
+    MOV CL, AH
+    DEC CL                          ; CL = bar_height - 1
+    CMP AL, CL
+    JZ .vbar_down
+
+    ; --- Track/thumb click: detect thumb position ---
+    ; AL = rel_row, AH = bar_height
+    ; click_track_pos = rel_row - 1 (0-based within track)
+    DEC AL                           ; AL = click_track_pos
+    ; Save click_track_pos and bar_height
+    ; sb_scratch: [0]=click_pos, [1]=bar_height, [2]=thumb_size, [3]=thumb_pos
+    MOV [sb_scratch], AL             ; [0] = click_track_pos
+    MOV [sb_scratch + 1], AH         ; [1] = bar_height
+
+    ; track_len = bar_height - 2
+    PUSH DX
+    XOR AH, AH
+    MOV AL, [sb_scratch + 1]
+    SUB AL, 2                        ; AL = track_len
+
+    ; thumb_size = max(1, (visible * track_len) / total)
+    MOV CL, AL                       ; save track_len in CL
+    XOR AH, AH
+    MOV AL, [BX + CTRL_H]
+    DEC AL                            ; AL = visible (text height)
+    XOR CH, CH                        ; CX = track_len
+    MUL CX                            ; AX = visible * track_len
+    XOR DX, DX
+    DIV WORD [SI + ED_LINECOUNT]      ; AX = thumb_size
+    OR AL, AL
+    JNZ .vbar_ts_ok
+    MOV AL, 1
+.vbar_ts_ok:
+    MOV [sb_scratch + 2], AL          ; [2] = thumb_size
+
+    ; range = track_len - thumb_size
+    XOR AH, AH
+    MOV AL, CL                        ; AL = track_len
+    SUB AL, [sb_scratch + 2]          ; AL = range
+    OR AL, AL
+    JZ .vbar_range_zero
+
+    ; thumb_pos = (scrolly * range) / max_scroll
+    ; max_scroll = linecount - visible
+    XOR AH, AH
+    MUL WORD [SI + ED_SCROLLY]        ; DX:AX = range * scrolly
+    ; Divide by max_scroll
+    MOV CX, [SI + ED_LINECOUNT]
+    PUSH AX
+    XOR AH, AH
+    MOV AL, [BX + CTRL_H]
+    DEC AL
+    SUB CX, AX                        ; CX = max_scroll
+    POP AX
+    OR CX, CX
+    JZ .vbar_range_zero
+    DIV CX                            ; AX = thumb_pos
+    MOV [sb_scratch + 3], AL          ; [3] = thumb_pos
+    POP DX
+
+    ; Compare click_track_pos against thumb region
+    MOV AL, [sb_scratch]              ; click_track_pos
+    CMP AL, [sb_scratch + 3]
+    JB .vbar_page_up                  ; click above thumb
+
+    MOV AH, [sb_scratch + 3]
+    ADD AH, [sb_scratch + 2]         ; AH = thumb_pos + thumb_size
+    CMP AL, AH
+    JAE .vbar_page_down              ; click below thumb
+
+    ; --- Click ON the thumb: start drag ---
+    SUB AL, [sb_scratch + 3]         ; AL = offset within thumb
+    MOV [mouse_state + MS_SB_OFFSET], AL
+    MOV [mouse_state + MS_SB_CTRL], BX
+    MOV BYTE [mouse_state + MS_SB_DIR], 0  ; vertical
+    OR BYTE [mouse_state + MS_FLAGS], MSF_SB_DRAG
+    JMP .vbar_click_done
+
+.vbar_range_zero:
+    POP DX
+    JMP .vbar_click_done
+
+.vbar_up:
+    ; Scroll up by 1
+    CMP WORD [SI + ED_SCROLLY], 0
+    JE .vbar_click_done
+    DEC WORD [SI + ED_SCROLLY]
+    JMP .vbar_click_done
+
+.vbar_down:
+    ; Scroll down by 1: max_scroll = linecount - text_height
+    PUSH AX
+    XOR AH, AH
+    MOV AL, [BX + CTRL_H]
+    DEC AL                           ; visible height
+    MOV CX, [SI + ED_LINECOUNT]
+    SUB CX, AX                      ; CX = max_scroll
+    CMP [SI + ED_SCROLLY], CX
+    JAE .vbar_down_done
+    INC WORD [SI + ED_SCROLLY]
+.vbar_down_done:
+    POP AX
+    JMP .vbar_click_done
+
+.vbar_page_up:
+    ; ED_SCROLLY -= text_height, clamp 0
+    XOR AH, AH
+    MOV AL, [BX + CTRL_H]
+    DEC AL
+    CMP [SI + ED_SCROLLY], AX
+    JAE .vbar_pgu_sub
+    MOV WORD [SI + ED_SCROLLY], 0
+    JMP .vbar_click_done
+.vbar_pgu_sub:
+    SUB [SI + ED_SCROLLY], AX
+    JMP .vbar_click_done
+
+.vbar_page_down:
+    ; ED_SCROLLY += text_height, clamp max
+    PUSH DX
+    XOR AH, AH
+    MOV AL, [BX + CTRL_H]
+    DEC AL                           ; AL = visible
+    MOV DX, [SI + ED_LINECOUNT]
+    SUB DX, AX                      ; DX = max_scroll
+    ADD AX, [SI + ED_SCROLLY]       ; AX = scroll + visible
+    CMP AX, DX
+    JBE .vbar_pgd_ok
+    MOV AX, DX
+.vbar_pgd_ok:
+    MOV [SI + ED_SCROLLY], AX
+    POP DX
+    JMP .vbar_click_done
+
+.vbar_click_done:
+    POP SI                           ; restore window ptr
+    MOV BYTE [fw_state + FW_DIRTY], 1
+    POP DI
+    POP CX
+    POP AX
+    RET
+
+.no_vbar_click:
+
     ; Switch SI to editor state
     PUSH SI
     MOV SI, [BX + CTRL_ED_STATE]
@@ -983,6 +1330,15 @@ tui_ed_mouse_press: PROC
     MOV CL, [BX + CTRL_H]
     DEC CL
     MOV CH, [BX + CTRL_W]
+    ; Narrow width if vbar present
+    PUSH AX
+    XOR AH, AH
+    MOV AL, CL
+    CMP [SI + ED_LINECOUNT], AX
+    JBE .ev2_no_vbar
+    DEC CH
+.ev2_no_vbar:
+    POP AX
     CALL gap_ensure_visible
 
     POP SI
@@ -1073,6 +1429,15 @@ tui_ed_mouse_drag: PROC
     MOV CL, [BX + CTRL_H]
     DEC CL
     MOV CH, [BX + CTRL_W]
+    ; Narrow width if vbar present
+    PUSH AX
+    XOR AH, AH
+    MOV AL, CL
+    CMP [SI + ED_LINECOUNT], AX
+    JBE .ev3_no_vbar
+    DEC CH
+.ev3_no_vbar:
+    POP AX
     CALL gap_ensure_visible
 
     MOV BYTE [fw_state + FW_DIRTY], 1

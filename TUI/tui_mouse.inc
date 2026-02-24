@@ -167,9 +167,6 @@ ENDP
 tui_mouse_dispatch: PROC
     PushAll
 
-    ; Always mark dirty for cursor redraw
-    MOV BYTE [fw_state + FW_DIRTY], 1
-
     ; If dragging, handle drag motion
     TEST BYTE [mouse_state + MS_FLAGS], MSF_DRAGGING
     JZ .not_dragging
@@ -1917,6 +1914,10 @@ tui_mouse_on_sb_drag: PROC
     JNZ .sbd_not_tv
     JMP .sbd_v_textview
 .sbd_not_tv:
+    CMP BYTE [BX + CTRL_TYPE], CTYPE_EDITOR
+    JNZ .sbd_not_ed
+    JMP .sbd_v_editor
+.sbd_not_ed:
     JMP .sbd_done
 
 .sbd_v_listbox:
@@ -2074,6 +2075,84 @@ tui_mouse_on_sb_drag: PROC
 
 .sbd_vt_no_range:
     POP DX
+    JMP .sbd_done
+
+.sbd_v_editor:
+    ; --- Vertical drag for editor control ---
+    ; BX = control ptr, DH = abs_top_row
+    ; bar_height = CTRL_H - 1 (text area, excludes status bar)
+    ; Editor state at [BX + CTRL_ED_STATE], ED_SCROLLY/ED_LINECOUNT are WORDs
+    PUSH DI
+    MOV DI, [BX + CTRL_ED_STATE]   ; DI = editor state ptr
+
+    ; sb_scratch: [0]=visible, [1]=bar_top_row, [2]=track_len, [3]=thumb_size
+    MOV CL, [BX + CTRL_H]
+    DEC CL                          ; CL = visible = bar_height
+    MOV [sb_scratch], CL            ; [0] = visible
+    MOV [sb_scratch + 1], DH        ; [1] = bar_top_row
+
+    MOV AL, CL
+    SUB AL, 2                       ; AL = track_len
+    MOV [sb_scratch + 2], AL        ; [2] = track_len
+
+    ; thumb_size = max(1, (visible * track_len) / total)
+    PUSH DX
+    XOR AH, AH
+    MOV AL, CL                      ; AL = visible
+    XOR CH, CH                      ; CX = track_len
+    MOV CL, [sb_scratch + 2]
+    MUL CX                          ; AX = visible * track_len
+    XOR DX, DX
+    DIV WORD [DI + ED_LINECOUNT]    ; AX = thumb_size
+    POP DX
+    OR AL, AL
+    JNZ .sbd_ve_ts_ok
+    MOV AL, 1
+.sbd_ve_ts_ok:
+    MOV [sb_scratch + 3], AL        ; [3] = thumb_size
+
+    ; range = track_len - thumb_size
+    MOV AL, [sb_scratch + 2]        ; track_len
+    SUB AL, [sb_scratch + 3]        ; AL = range
+    OR AL, AL
+    JZ .sbd_ve_no_range
+
+    ; relative = mouse_row - bar_top - 1 - offset
+    MOV AH, [mouse_state + MS_ROW]
+    SUB AH, [sb_scratch + 1]       ; AH = mouse_row - bar_top
+    DEC AH                          ; -1 (past up arrow)
+    SUB AH, [mouse_state + MS_SB_OFFSET]
+
+    ; Clamp relative to 0..range (AL = range)
+    CMP AH, 80h
+    JB .sbd_ve_not_neg
+    XOR AH, AH
+.sbd_ve_not_neg:
+    CMP AH, AL
+    JBE .sbd_ve_rel_ok
+    MOV AH, AL
+.sbd_ve_rel_ok:
+    ; new_scroll = (relative * max_scroll_real) / range
+    ; max_scroll_real = linecount - visible
+    PUSH AX                         ; save AL=range
+    MOV AL, AH                      ; AL = relative
+    XOR AH, AH
+    MOV CX, [DI + ED_LINECOUNT]
+    XOR DH, DH
+    MOV DL, [sb_scratch]            ; DX = visible
+    SUB CX, DX                     ; CX = max_scroll_real
+    MUL CX                          ; AX = relative * max_scroll_real
+    POP CX                          ; CL = range (saved AL)
+    XOR CH, CH
+    OR CX, CX
+    JZ .sbd_ve_no_range
+    XOR DX, DX
+    DIV CX                          ; AX = new_scroll
+    MOV [DI + ED_SCROLLY], AX
+    MOV BYTE [fw_state + FW_DIRTY], 1
+
+.sbd_ve_no_range:
+    POP DI
     JMP .sbd_done
 
 .sbd_horizontal:

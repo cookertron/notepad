@@ -69,8 +69,14 @@ dlg_listbox:     RESB 19        ; listbox control struct (file dialog)
 dlg_file_dta:    RESB 43        ; DOS Disk Transfer Area
 dlg_file_path:   RESB 65        ; CWD display buffer ("\DIRNAME\0")
 dlg_file_count:  RESB 1         ; number of entries in list
-dlg_file_items:  RESW 32        ; item pointer array (32 WORD ptrs = 64 bytes)
-dlg_file_names:  RESB 448       ; name storage (32 entries x 14 bytes)
+dlg_file_items:  RESW 128       ; item pointer array (128 WORD ptrs = 256 bytes)
+dlg_file_names:  RESB 1792      ; name storage (128 entries x 14 bytes)
+
+; --- Drive dropdown scratch (file dialog) ---
+dlg_drive_dd:    RESB 21        ; dropdown control struct (CTRL_DD_SIZE)
+dlg_drive_count: RESB 1         ; number of detected drives
+dlg_drive_items: RESW 26        ; pointer array (26 drives max, 52 bytes)
+dlg_drive_names: RESB 78        ; name storage (26 x 3 bytes: "X:\0")
 
 ; --- Static button label strings ---
 dlg_str_ok:     DB 'OK', 0
@@ -80,3 +86,5 @@ dlg_str_no:     DB 'No', 0
 
 ; --- File dialog static strings ---
 dlg_file_pattern: DB '*.*', 0
+dlg_file_rootdir: DB '\', 0
+dlg_str_drive:   DB 'Drive:', 0

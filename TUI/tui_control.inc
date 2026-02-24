@@ -344,7 +344,20 @@ tui_ctrl_activate: PROC
     JZ .call_handler
     CMP BYTE [BX + CTRL_TYPE], CTYPE_TEXTVIEW
     JZ .call_handler
+    CMP BYTE [BX + CTRL_TYPE], CTYPE_TEXTBOX
+    JZ .do_textbox
     JMP .done
+
+.do_textbox:
+    ; Enter on a textbox: find and activate the first button in the window
+    MOV BX, [SI + WIN_FIRST]
+.tb_find_btn:
+    OR BX, BX
+    JZ .done                    ; no button found
+    CMP BYTE [BX + CTRL_TYPE], CTYPE_BUTTON
+    JZ .call_handler            ; found a button — activate it
+    MOV BX, [BX + CTRL_NEXT]
+    JMP .tb_find_btn
 
 .do_button:
     JMP .call_handler

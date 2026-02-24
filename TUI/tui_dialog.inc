@@ -971,6 +971,158 @@ dlg_file_ok_handler:
     RET
 
 ; ----------------------------------------------------------------------------
+; tui_file_detect_drives - Probe drives A-Z using IOCTL, fill dlg_drive_*
+; Output: dlg_drive_count, dlg_drive_items[], dlg_drive_names[] populated
+; ----------------------------------------------------------------------------
+tui_file_detect_drives: PROC
+    PUSH AX
+    PUSH BX
+    PUSH CX
+    PUSH DX
+    PUSH DI
+
+    MOV BYTE [dlg_drive_count], 0
+    MOV DI, dlg_drive_names          ; DI = next name slot
+    MOV CX, dlg_drive_items          ; CX = next item pointer slot
+    MOV BL, 1                        ; BL = drive number (1=A, 2=B, ...)
+
+.detect_loop:
+    CMP BL, 27
+    JAE .detect_done
+
+    ; IOCTL: check if block device
+    MOV AX, 4409h
+    INT 21h
+    JC .detect_next                  ; CF=1 means drive not available
+
+    ; Drive exists — store "X:" string
+    MOV AL, BL
+    ADD AL, 'A' - 1                  ; convert 1-based to letter
+    MOV [DI], AL
+    MOV BYTE [DI + 1], ':'
+    MOV BYTE [DI + 2], 0
+
+    ; Store pointer in items array
+    PUSH BX
+    MOV BX, CX
+    MOV [BX], DI
+    POP BX
+    ADD CX, 2                        ; advance item pointer
+    ADD DI, 3                        ; advance name slot
+    INC BYTE [dlg_drive_count]
+
+.detect_next:
+    INC BL
+    JMP .detect_loop
+
+.detect_done:
+    POP DI
+    POP DX
+    POP CX
+    POP BX
+    POP AX
+    RET
+ENDP
+
+; ----------------------------------------------------------------------------
+; _dlg_file_find_cur_drive - Find index of current drive in dlg_drive_items
+; Output: AL = index into dlg_drive_items (0-based), or 0 if not found
+; ----------------------------------------------------------------------------
+_dlg_file_find_cur_drive: PROC
+    PUSH BX
+    PUSH CX
+    PUSH SI
+
+    ; Get current drive letter
+    MOV AH, 19h
+    INT 21h                          ; AL = 0=A, 1=B, ...
+    ADD AL, 'A'                      ; AL = drive letter
+    MOV AH, AL                       ; AH = target letter
+
+    ; Linear search dlg_drive_items
+    MOV SI, dlg_drive_items
+    MOV CL, [dlg_drive_count]
+    XOR BL, BL                       ; BL = index
+
+.find_loop:
+    OR CL, CL
+    JZ .find_notfound
+    PUSH BX
+    MOV BX, [SI]                     ; BX = ptr to "X:" string
+    CMP [BX], AH                     ; compare first char
+    POP BX
+    JZ .find_found
+    ADD SI, 2
+    INC BL
+    DEC CL
+    JMP .find_loop
+
+.find_found:
+    MOV AL, BL
+    JMP .find_ret
+
+.find_notfound:
+    XOR AL, AL                       ; default to index 0
+
+.find_ret:
+    POP SI
+    POP CX
+    POP BX
+    RET
+ENDP
+
+; ----------------------------------------------------------------------------
+; dlg_file_drive_handler - Dropdown commit handler for drive selection
+; Input: SI = dropdown control, DI = dialog window
+; Switches to selected drive, chdir root, re-enumerates files
+; ----------------------------------------------------------------------------
+dlg_file_drive_handler: PROC
+    PUSH AX
+    PUSH BX
+    PUSH DX
+
+    ; Get selected drive letter from items[SEL]
+    MOV AL, [SI + CTRL_DD_SEL]
+    XOR AH, AH
+    SHL AX, 1
+    MOV BX, [SI + CTRL_DD_ITEMS]
+    ADD BX, AX
+    MOV BX, [BX]                     ; BX = ptr to "X:" string
+    MOV AL, [BX]                     ; AL = drive letter
+
+    ; Select disk: AH=0Eh, DL = drive (0-based)
+    SUB AL, 'A'
+    MOV DL, AL
+    MOV AH, 0Eh
+    INT 21h
+
+    ; Chdir to root: AH=3Bh, DX = "\"
+    MOV AH, 3Bh
+    MOV DX, dlg_file_rootdir
+    INT 21h
+
+    ; Re-enumerate files and update path
+    CALL tui_file_enumerate
+    CALL tui_file_get_path
+
+    ; Update listbox control
+    PUSH SI
+    MOV SI, dlg_listbox
+    MOV AL, [dlg_file_count]
+    MOV [SI + CTRL_LB_COUNT], AL
+    MOV BYTE [SI + CTRL_LB_SEL], 0
+    MOV BYTE [SI + CTRL_LB_SCROLL], 0
+    POP SI
+
+    MOV BYTE [fw_state + FW_DIRTY], 1
+
+    POP DX
+    POP BX
+    POP AX
+    RET
+ENDP
+
+; ----------------------------------------------------------------------------
 ; tui_dlg_file - File selector dialog
 ; Input:  DI = title string ptr, BX = result buffer ptr, CL = max filename len
 ; Output: AL = DLG_OK (1) or DLG_CANCEL (0)
@@ -985,17 +1137,62 @@ tui_dlg_file: PROC
     MOV [dlg_save_buf], BX
     MOV [dlg_save_maxlen], CL
 
+    ; Detect available drives and find current drive index
+    CALL tui_file_detect_drives
+    CALL _dlg_file_find_cur_drive    ; AL = current drive index
+    PUSH AX                          ; save drive index for dropdown SEL
+
     ; Populate path display and file list
     CALL tui_file_get_path
     CALL tui_file_enumerate
 
-    ; --- Build path label (dlg_label) ---
-    MOV DI, dlg_label
+    ; --- Build "Drive:" label (dlg_label2) at row 0, col 0 ---
+    POP AX                           ; AL = current drive index
+    PUSH AX                          ; re-save for dropdown below
+    MOV DI, dlg_label2
     MOV BYTE [DI + CTRL_TYPE], CTYPE_LABEL
     MOV BYTE [DI + CTRL_FLAGS], CTRLF_VISIBLE
     MOV BYTE [DI + CTRL_X], 0
     MOV BYTE [DI + CTRL_Y], 0
-    MOV BYTE [DI + CTRL_W], 32
+    MOV BYTE [DI + CTRL_W], 6
+    MOV BYTE [DI + CTRL_H], 1
+    MOV WORD [DI + CTRL_NEXT], dlg_drive_dd
+    MOV WORD [DI + CTRL_TEXT], dlg_str_drive
+    MOV BYTE [DI + CTRL_ATTR], CLR_LABEL
+    MOV BYTE [DI + CTRL_FATTR], CLR_LABEL
+    MOV WORD [DI + CTRL_HANDLER], 0
+
+    ; --- Build drive dropdown (dlg_drive_dd) at row 0, col 7, width 5 ---
+    POP AX                           ; AL = current drive index
+    MOV DI, dlg_drive_dd
+    MOV BYTE [DI + CTRL_TYPE], CTYPE_DROPDOWN
+    MOV BYTE [DI + CTRL_FLAGS], CTRLF_VISIBLE + CTRLF_ENABLED + CTRLF_FOCUSABLE
+    MOV BYTE [DI + CTRL_X], 7
+    MOV BYTE [DI + CTRL_Y], 0
+    MOV BYTE [DI + CTRL_W], 5
+    MOV BYTE [DI + CTRL_H], 1
+    MOV WORD [DI + CTRL_NEXT], dlg_label
+    MOV WORD [DI + CTRL_TEXT], 0
+    MOV BYTE [DI + CTRL_ATTR], CLR_DD_NORMAL
+    MOV BYTE [DI + CTRL_FATTR], CLR_DD_FOCUS
+    MOV WORD [DI + CTRL_HANDLER], dlg_file_drive_handler
+    MOV WORD [DI + CTRL_DD_ITEMS], dlg_drive_items
+    PUSH AX
+    MOV AL, [dlg_drive_count]
+    MOV [DI + CTRL_DD_COUNT], AL
+    POP AX
+    MOV [DI + CTRL_DD_SEL], AL
+    MOV [DI + CTRL_DD_TMPSEL], AL
+    MOV BYTE [DI + CTRL_DD_SCROLL], 0
+    MOV BYTE [DI + CTRL_DD_MAXVIS], 8
+
+    ; --- Build path label (dlg_label) at row 0, col 13, width 19 ---
+    MOV DI, dlg_label
+    MOV BYTE [DI + CTRL_TYPE], CTYPE_LABEL
+    MOV BYTE [DI + CTRL_FLAGS], CTRLF_VISIBLE
+    MOV BYTE [DI + CTRL_X], 13
+    MOV BYTE [DI + CTRL_Y], 0
+    MOV BYTE [DI + CTRL_W], 19
     MOV BYTE [DI + CTRL_H], 1
     MOV WORD [DI + CTRL_NEXT], dlg_listbox
     MOV WORD [DI + CTRL_TEXT], dlg_file_path
@@ -1064,7 +1261,7 @@ tui_dlg_file: PROC
     MOV AX, [dlg_save_title]
     MOV [DI + WIN_TITLE], AX
     POP AX
-    MOV WORD [DI + WIN_FIRST], dlg_label
+    MOV WORD [DI + WIN_FIRST], dlg_label2
     MOV WORD [DI + WIN_FOCUS], dlg_listbox
     MOV WORD [DI + WIN_HANDLER], 0
     MOV BYTE [DI + WIN_ZORDER], 0

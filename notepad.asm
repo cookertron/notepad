@@ -298,6 +298,7 @@ ENDP
 ; String Data
 ; ============================================================================
 
+str_mda_error:  DB 'This program requires a CGA, EGA, or VGA display adapter.', 0Dh, 0Ah, '$'
 str_untitled:   DB 'Untitled', 0
 str_about_title: DB 'About', 0
 str_about_l1:    DB 'DOS Notepad v1.0', 0
@@ -331,6 +332,21 @@ str_replace:    DB 'Replace', 0
 
 str_about:      DB 'About', 0
 
+; --- Accelerator display strings ---
+str_acc_ctrl_n: DB 'Ctrl+N', 0
+str_acc_ctrl_o: DB 'Ctrl+O', 0
+str_acc_ctrl_s: DB 'Ctrl+S', 0
+str_acc_ctrl_z: DB 'Ctrl+Z', 0
+str_acc_ctrl_y: DB 'Ctrl+Y', 0
+str_acc_ctrl_x: DB 'Ctrl+X', 0
+str_acc_ctrl_c: DB 'Ctrl+C', 0
+str_acc_ctrl_v: DB 'Ctrl+V', 0
+str_acc_ctrl_a: DB 'Ctrl+A', 0
+str_acc_ctrl_f: DB 'Ctrl+F', 0
+str_acc_f3:     DB 'F3', 0
+str_acc_ctrl_r: DB 'Ctrl+R', 0
+str_acc_alt_x:  DB 'Alt+X', 0
+
 ; ============================================================================
 ; Menu Data Structures
 ; ============================================================================
@@ -338,64 +354,94 @@ str_about:      DB 'About', 0
 file_entries:
     DW str_new,      handler_file_new
     DB 0, 'N'                        ; 'N'ew
+    DW str_acc_ctrl_n                ; accel text
+    DB 0, 0                          ; accel_key=0 (display only), pad
     DW str_open,     handler_file_open
     DB 0, 'O'                        ; 'O'pen
+    DW str_acc_ctrl_o
+    DB 0, 0
     DW str_save,     handler_file_save
     DB 0, 'S'                        ; 'S'ave
+    DW str_acc_ctrl_s
+    DB 0, 0
     DW str_save_as,  handler_file_save_as
     DB 5, 'A'                        ; Save 'A's
+    DW 0                             ; no accel
+    DB 0, 0
     DW str_exit,     handler_file_exit
     DB 1, 'x'                        ; E'x'it
+    DW str_acc_alt_x
+    DB 2Dh, 0                        ; accel_key=2Dh (Alt+X scan), pad
 
 edit_entries:
     DW str_undo,     handler_edit_undo
     DB 0, 'U'                        ; 'U'ndo
+    DW str_acc_ctrl_z
+    DB 0, 0
     DW str_redo,     handler_edit_redo
     DB 0, 'R'                        ; 'R'edo
+    DW str_acc_ctrl_y
+    DB 0, 0
     DW str_cut,      handler_edit_cut
     DB 2, 't'                        ; Cu't'
+    DW str_acc_ctrl_x
+    DB 0, 0
     DW str_copy,     handler_edit_copy
     DB 0, 'C'                        ; 'C'opy
+    DW str_acc_ctrl_c
+    DB 0, 0
     DW str_paste,    handler_edit_paste
     DB 0, 'P'                        ; 'P'aste
+    DW str_acc_ctrl_v
+    DB 0, 0
     DW str_sel_all,  handler_edit_sel_all
     DB 7, 'A'                        ; Select 'A'll
+    DW str_acc_ctrl_a
+    DB 0, 0
 
 search_entries:
     DW str_find,      handler_search_find
     DB 0, 'F'                        ; 'F'ind
+    DW str_acc_ctrl_f
+    DB 0, 0
     DW str_find_next, handler_search_find_next
     DB 5, 'N'                        ; Find 'N'ext
+    DW str_acc_f3
+    DB 0, 0
     DW str_replace,   handler_search_replace
     DB 0, 'R'                        ; 'R'eplace
+    DW str_acc_ctrl_r
+    DB 0, 0
 
 help_entries:
     DW str_about,     handler_help_about
     DB 0, 'A'                        ; 'A'bout
+    DW 0                             ; no accel
+    DB 0, 0
 
 menu_items:
     DW str_file
     DB 1, 6
     DW file_entries
-    DB 5, 9
+    DB 5, 18                ; MI_ECOUNT=5, MI_DDW=18 (widened for accel text)
     DB 0, 21h               ; MI_HOTIDX=0 ('F'), MI_ALTKEY=21h (Alt+F)
 
     DW str_edit
     DB 7, 6
     DW edit_entries
-    DB 6, 12
+    DB 6, 18                ; MI_ECOUNT=6, MI_DDW=18 (widened for accel text)
     DB 0, 12h               ; MI_HOTIDX=0 ('E'), MI_ALTKEY=12h (Alt+E)
 
     DW str_search
     DB 13, 8
     DW search_entries
-    DB 3, 11
+    DB 3, 18                ; MI_ECOUNT=3, MI_DDW=18 (widened for accel text)
     DB 0, 1Fh               ; MI_HOTIDX=0 ('S'), MI_ALTKEY=1Fh (Alt+S)
 
     DW str_help
     DB 21, 6
     DW help_entries
-    DB 1, 8
+    DB 1, 8                 ; MI_DDW=8 (unchanged, no accel)
     DB 0, 23h               ; MI_HOTIDX=0 ('H'), MI_ALTKEY=23h (Alt+H)
 
 menubar_data:
@@ -506,6 +552,27 @@ ENDP
 ; ============================================================================
 
 main:
+    ; Check for MDA adapter (mode 7) — only 4KB VRAM, no page 1
+    MOV AH, 0Fh                ; get current video mode
+    INT 10h                    ; AL = mode
+    CMP AL, 07h                ; mode 7 = MDA
+    JNZ _not_mda
+    MOV AH, 09h                ; print string
+    MOV DX, str_mda_error
+    INT 21h
+    INT 20h                    ; exit
+_not_mda:
+
+    ; Save current drive and directory (restored on exit)
+    MOV AH, 19h                ; get current drive
+    INT 21h
+    MOV [saved_drive], AL      ; 0=A, 1=B, 2=C, ...
+    MOV AH, 47h                ; get current directory
+    MOV DL, 0                  ; 0 = default (current) drive
+    MOV SI, saved_cwd + 1      ; buffer (skip leading backslash)
+    INT 21h
+    MOV BYTE [saved_cwd], '\'  ; prepend backslash
+
     ; Save screen contents and cursor before TUI takes over
     CALL _save_screen
 
@@ -551,6 +618,14 @@ _no_cmdline_file:
     ; Restore screen contents and cursor
     CALL _restore_screen
 
+    ; Restore original drive and directory
+    MOV AH, 0Eh                ; select disk
+    MOV DL, [saved_drive]
+    INT 21h
+    MOV AH, 3Bh                ; chdir
+    MOV DX, saved_cwd
+    INT 21h
+
     ; Clean exit to DOS
     INT 20h
 
@@ -573,6 +648,8 @@ ed_find_buf:     RESB 64            ; search term buffer
 ed_replace_buf:  RESB 64            ; replacement text buffer
 ed_find_len:     RESW 1             ; cached search term length
 saved_cursor:    RESW 1             ; saved cursor position (DH=row, DL=col)
+saved_drive:     RESB 1             ; saved drive number (0=A, 1=B, 2=C, ...)
+saved_cwd:       RESB 65            ; saved working directory (backslash + path + null)
 
 ; --- Undo/Redo data ---
 undo_buf:             RESB UNDO_BUFSIZE
