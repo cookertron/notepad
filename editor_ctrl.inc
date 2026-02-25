@@ -24,6 +24,8 @@ ed_mouse_absrow:   DB 0        ; control absolute Y (cached on press for drag)
 ed_mouse_abscol:   DB 0        ; control absolute X
 ed_mouse_oldcur:   DW 0        ; old cursor offset before mouse press
 ed_needs_vbar:     DB 0        ; 1 if vertical scroll bar needed
+ed_paint_vcol:     DW 0        ; visual column tracker during paint
+ed_cursor_offset:  DW 0        ; precomputed cursor logical offset
 ed_clip_digits:    DB 0        ; digit count scratch for clip free
 ed_undo_digits:    DB 0        ; digit count scratch for undo free
 ed_gap_digits:     DB 0        ; digit count scratch for gap free
@@ -321,6 +323,10 @@ tui_ctrl_draw_editor: PROC
     MOV [ed_sel_end], BX
 .no_sel_setup:
 
+    ; Precompute cursor logical offset for cursor-check during paint
+    CALL gap_cursor_offset
+    MOV [ed_cursor_offset], AX
+
     ; Find physical pointer to first visible line (ED_SCROLLY)
     MOV AX, [SI + ED_SCROLLY]
     CALL gap_find_line_phys     ; DI = physical ptr to line start
@@ -381,8 +387,9 @@ tui_ctrl_draw_editor: PROC
     POP CX
     POP AX
 
-    ; --- Skip SCROLLX chars in the buffer line ---
+    ; --- Skip to SCROLLX visual column ---
     PUSH CX
+    MOV WORD [ed_paint_vcol], 0
     MOV BX, [SI + ED_SCROLLX]
     TEST BX, BX
     JZ .sx_done
@@ -392,10 +399,22 @@ tui_ctrl_draw_editor: PROC
     JAE .sx_done
     CMP BYTE [DI], 0Ah
     JE .sx_done
+    ; Advance vcol by char width
+    CMP BYTE [DI], 09h
+    JNE .sx_regular
+    ; TAB: advance to next tab stop
+    MOV CX, [ed_paint_vcol]
+    ADD CX, ED_TABWIDTH
+    AND CX, 0FFF8h
+    MOV [ed_paint_vcol], CX
+    JMP .sx_check
+.sx_regular:
+    INC WORD [ed_paint_vcol]
+.sx_check:
     INC DI
     INC WORD [ed_paint_offset]
-    DEC BX
-    JNZ .sx_loop
+    CMP [ed_paint_vcol], BX
+    JB .sx_loop
 .sx_done:
     POP CX
 
@@ -403,7 +422,6 @@ tui_ctrl_draw_editor: PROC
     PUSH CX
     PUSH DX
     MOV BL, [ed_paint_width]    ; BL = remaining columns
-    XOR BH, BH                  ; BH = visible column counter
 
 .ch_loop:
     OR BL, BL
@@ -414,7 +432,11 @@ tui_ctrl_draw_editor: PROC
     CMP BYTE [DI], 0Ah
     JE .ch_eol
 
-    ; Draw character
+    ; Check for TAB character
+    CMP BYTE [DI], 09h
+    JE .ch_tab
+
+    ; --- Regular character ---
     PUSH AX
     MOV AL, [DI]
     ; Selection highlight check
@@ -427,15 +449,13 @@ tui_ctrl_draw_editor: PROC
     MOV AH, CLR_ED_SELECT
 .ch_no_sel:
     POP CX
-    ; Check cursor (overrides selection)
+    ; Check cursor (offset-based)
     CMP BYTE [ed_paint_curline], 0
     JE .ch_no_cur
-    PUSH DX
-    MOV DX, [SI + ED_SCROLLX]
-    ADD DL, BH
-    ADC DH, 0
-    CMP DX, [SI + ED_CURCOL]
-    POP DX
+    PUSH CX
+    MOV CX, [ed_paint_offset]
+    CMP CX, [ed_cursor_offset]
+    POP CX
     JNE .ch_no_cur
     MOV AH, CLR_ED_CURSOR
 .ch_no_cur:
@@ -444,8 +464,67 @@ tui_ctrl_draw_editor: PROC
     INC DL
     INC DI
     INC WORD [ed_paint_offset]
-    INC BH
+    INC WORD [ed_paint_vcol]
     DEC BL
+    JMP .ch_loop
+
+.ch_tab:
+    ; --- TAB: expand to spaces ---
+    PUSH AX
+    ; Compute spaces: next_tab = (vcol + 8) & FFF8h; spaces = next_tab - vcol
+    MOV CX, [ed_paint_vcol]
+    ADD CX, ED_TABWIDTH
+    AND CX, 0FFF8h
+    SUB CX, [ed_paint_vcol]    ; CX = spaces to paint
+    ; Clamp to remaining width
+    XOR CH, CH                 ; CX was small, but ensure CH=0
+    CMP CL, BL
+    JBE .tab_clamp_ok
+    MOV CL, BL
+.tab_clamp_ok:
+    ; Determine attribute for this TAB
+    MOV AH, CLR_ED_TEXT
+    CMP BYTE [ed_paint_curline], 0
+    JE .tab_attr_base
+    MOV AH, CLR_ED_CURLINE
+.tab_attr_base:
+    ; Selection check
+    PUSH DX
+    MOV DX, [ed_paint_offset]
+    CMP DX, [ed_sel_start]
+    JB .tab_no_sel
+    CMP DX, [ed_sel_end]
+    JAE .tab_no_sel
+    MOV AH, CLR_ED_SELECT
+.tab_no_sel:
+    ; Cursor check (offset-based)
+    CMP BYTE [ed_paint_curline], 0
+    JE .tab_no_cur
+    CMP DX, [ed_cursor_offset]
+    JNE .tab_no_cur
+    MOV AH, CLR_ED_CURSOR
+.tab_no_cur:
+    POP DX
+    ; Paint CL space characters
+    MOV AL, 20h
+.tab_paint:
+    TEST CL, CL
+    JZ .tab_paint_done
+    CALL tui_putchar
+    INC DL
+    DEC BL
+    DEC CL
+    JMP .tab_paint
+.tab_paint_done:
+    ; Update vcol to actual next tab stop (not clamped)
+    MOV CX, [ed_paint_vcol]
+    ADD CX, ED_TABWIDTH
+    AND CX, 0FFF8h
+    MOV [ed_paint_vcol], CX
+    ; Advance past the single TAB byte
+    INC DI
+    INC WORD [ed_paint_offset]
+    POP AX
     JMP .ch_loop
 
 .ch_eol:
@@ -462,15 +541,13 @@ tui_ctrl_draw_editor: PROC
     MOV AH, CLR_ED_SELECT
 .eol_no_sel:
     POP CX
-    ; Cursor check (overrides selection)
+    ; Cursor check (offset-based)
     CMP BYTE [ed_paint_curline], 0
     JE .eol_no_cur
-    PUSH DX
-    MOV DX, [SI + ED_SCROLLX]
-    ADD DL, BH
-    ADC DH, 0
-    CMP DX, [SI + ED_CURCOL]
-    POP DX
+    PUSH CX
+    MOV CX, [ed_paint_offset]
+    CMP CX, [ed_cursor_offset]
+    POP CX
     JNE .eol_no_cur
     MOV AH, CLR_ED_CURSOR
 .eol_no_cur:
@@ -641,7 +718,9 @@ tui_ctrl_draw_editor: PROC
 
     ; --- Draw vertical scroll bar if needed ---
     CMP BYTE [ed_needs_vbar], 0
-    JZ .vbar_draw_done
+    JNZ .vbar_do_draw
+    JMP .vbar_draw_done
+.vbar_do_draw:
 
     ; Column = rightmost column of control (using BP = saved control ptr)
     MOV DL, [ed_paint_origdl]
@@ -751,6 +830,10 @@ tui_ed_handle_key: PROC
     JZ .backspace
     CMP AL, 0Dh                 ; Enter
     JZ .enter
+    CMP AL, 09h                 ; Tab
+    JNE .not_tab_key
+    JMP .tab_key
+.not_tab_key:
     CMP AL, 20h
     JB .check_ctrl
     CMP AL, 7Eh
@@ -801,6 +884,23 @@ tui_ed_handle_key: PROC
     CALL undo_record_insert1
     JMP .handled
 
+.tab_key:
+    CMP WORD [SI + ED_SELANCHOR], 0FFFFh
+    JE .tab_no_sel
+    CALL undo_capture_selection
+    CALL _ed_sel_delete
+    MOV AL, 09h
+    CALL gap_insert_char
+    MOV CX, 1
+    CALL undo_record_compound
+    JMP .handled
+.tab_no_sel:
+    CALL undo_save_cursor
+    MOV AL, 09h
+    CALL gap_insert_char
+    CALL undo_record_insert1
+    JMP .handled
+
 .check_ctrl:
     CMP AL, KEY_CTRL_C
     JE .ctrl_copy
@@ -813,11 +913,18 @@ tui_ed_handle_key: PROC
     CMP AL, KEY_CTRL_R
     JE .ctrl_replace
     CMP AL, KEY_CTRL_A
-    JNE .check_undo
+    JNE .check_file
     ; Select All: anchor=0, move cursor to end
     MOV WORD [SI + ED_SELANCHOR], 0
     CALL _ed_move_to_end
     JMP .handled
+.check_file:
+    CMP AL, KEY_CTRL_O
+    JE .ctrl_open
+    CMP AL, KEY_CTRL_N
+    JE .ctrl_new
+    CMP AL, KEY_CTRL_S
+    JE .ctrl_save
 .check_undo:
     CMP AL, KEY_CTRL_Z
     JE .ctrl_undo
@@ -840,6 +947,15 @@ tui_ed_handle_key: PROC
 .ctrl_paste:
     CALL editor_clipboard_paste
     JMP .handled
+.ctrl_open:
+    CALL editor_file_open
+    JMP .handled_dlg
+.ctrl_new:
+    CALL editor_file_new
+    JMP .handled_dlg
+.ctrl_save:
+    CALL editor_file_save
+    JMP .handled_dlg
 .ctrl_find:
     CALL editor_find
     JMP .handled_dlg
@@ -1034,15 +1150,16 @@ _ed_screen_to_offset: PROC
     MOV AX, BX
 .line_ok:
 
-    ; target_col = ED_SCROLLX + rel_col
+    ; target_vcol = ED_SCROLLX + rel_col (visual column)
     XOR CH, CH
     MOV CL, DL
-    ADD CX, [SI + ED_SCROLLX]
+    ADD CX, [SI + ED_SCROLLX]      ; CX = target visual column
 
     ; Find physical start of target_line
     CALL gap_find_line_phys         ; DI = physical start of line
 
-    ; Walk forward CX chars, skip gap, stop at LF or BUFEND
+    ; Walk forward tracking visual column, stop when vcol >= target
+    XOR BX, BX                     ; BX = current visual column
     TEST CX, CX
     JZ .col_done
 .col_walk:
@@ -1054,9 +1171,23 @@ _ed_screen_to_offset: PROC
     JAE .col_done
     CMP BYTE [DI], 0Ah
     JE .col_done
+    ; Advance vcol by character width
+    CMP BYTE [DI], 09h
+    JNE .cw_regular
+    ; TAB: compute next tab stop
+    PUSH AX
+    MOV AX, BX
+    ADD AX, ED_TABWIDTH
+    AND AX, 0FFF8h
+    MOV BX, AX
+    POP AX
+    JMP .cw_advance
+.cw_regular:
+    INC BX
+.cw_advance:
     INC DI
-    DEC CX
-    JNZ .col_walk
+    CMP BX, CX
+    JB .col_walk
 .col_done:
     ; Final gap skip (DI may have landed on GAPSTART after last INC)
     CMP DI, [SI + ED_GAPSTART]

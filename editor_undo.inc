@@ -610,5 +610,4 @@ _undo_apply: PROC
     RET
 ENDP
 
-; Temp buffer for captured selection data
-undo_sel_tmp: RESB ED_BUFSIZE
+; undo_sel_tmp - defined as EQU in BSS block (notepad.asm)

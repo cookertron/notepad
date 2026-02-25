@@ -30,9 +30,10 @@ str_repl_search_up: DB 'Search Up', 0
 str_repl_in_sel:    DB 'In Selection', 0
 str_repl_btn:      DB 'Replace', 0
 str_repl_all_btn:  DB 'Replace All', 0
+str_find_next_btn: DB 'Find Next', 0
 str_close_btn:     DB 'Close', 0
 str_repl_made:     DB ' replacements made', 0
-str_repl_count_msg: RESB 28        ; temp buffer for "N replacements made"
+; str_repl_count_msg - defined as EQU in BSS block (notepad.asm)
 
 ; ----------------------------------------------------------------------------
 ; _ed_compute_find_len - Measure ed_find_buf, store length in ed_find_len
@@ -191,7 +192,169 @@ _ed_find_backward: PROC
 ENDP
 
 ; ----------------------------------------------------------------------------
-; editor_find - Show Find dialog, search forward, "Not found" if miss
+; _ed_show_find_dlg - Build and show custom Find dialog
+; Dialog: 1 textbox, 2 checkboxes, 2 buttons (Find Next / Close)
+; Output: AL = DLG_OK (Find Next) or DLG_CANCEL (Close)
+; ----------------------------------------------------------------------------
+_ed_show_find_dlg: PROC
+    PushAll
+
+    ; Layout (interior 44x5, total 46x7):
+    ;   Row 0: Label "Find what:"
+    ;   Row 1: Textbox (find term, width 42)
+    ;   Row 2: [x] Search Up   [x] In Selection
+    ;   Row 3: (empty)
+    ;   Row 4: [ Find Next ]  [  Close  ]
+
+    ; --- Label: "Find what:" at row 0, x=1 ---
+    MOV DI, dlg_label
+    MOV BYTE [DI + CTRL_TYPE], CTYPE_LABEL
+    MOV BYTE [DI + CTRL_FLAGS], CTRLF_VISIBLE
+    MOV BYTE [DI + CTRL_X], 1
+    MOV BYTE [DI + CTRL_Y], 0
+    MOV BYTE [DI + CTRL_W], 10
+    MOV BYTE [DI + CTRL_H], 1
+    MOV WORD [DI + CTRL_NEXT], dlg_textbox
+    MOV WORD [DI + CTRL_TEXT], str_find_prompt
+    MOV BYTE [DI + CTRL_ATTR], CLR_LABEL
+    MOV BYTE [DI + CTRL_FATTR], CLR_LABEL
+    MOV WORD [DI + CTRL_HANDLER], 0
+
+    ; --- Textbox: Find term at row 1, x=1, width=42 ---
+    MOV DI, dlg_textbox
+    MOV BYTE [DI + CTRL_TYPE], CTYPE_TEXTBOX
+    MOV BYTE [DI + CTRL_FLAGS], CTRLF_VISIBLE + CTRLF_ENABLED + CTRLF_FOCUSABLE
+    MOV BYTE [DI + CTRL_X], 1
+    MOV BYTE [DI + CTRL_Y], 1
+    MOV BYTE [DI + CTRL_W], 42
+    MOV BYTE [DI + CTRL_H], 1
+    MOV WORD [DI + CTRL_NEXT], dlg_checkbox
+    MOV WORD [DI + CTRL_TEXT], ed_find_buf
+    MOV BYTE [DI + CTRL_ATTR], CLR_TEXTBOX
+    MOV BYTE [DI + CTRL_FATTR], CLR_TB_FOCUS
+    MOV WORD [DI + CTRL_HANDLER], 0
+    MOV BYTE [DI + CTRL_TB_MAXLEN], 63
+    MOV BYTE [DI + CTRL_TB_CURPOS], 0
+    MOV BYTE [DI + CTRL_TB_SCROLL], 0
+    ; Compute initial text length from ed_find_buf
+    PUSH SI
+    PUSH CX
+    MOV SI, ed_find_buf
+    XOR CX, CX
+.tb_len:
+    CMP BYTE [SI], 0
+    JZ .tb_len_done
+    INC SI
+    INC CL
+    JMP .tb_len
+.tb_len_done:
+    MOV [DI + CTRL_TB_LEN], CL
+    MOV [DI + CTRL_TB_CURPOS], CL
+    POP CX
+    POP SI
+
+    ; --- Checkbox 1: "Search Up" at row 2, x=1, width=13 ---
+    MOV DI, dlg_checkbox
+    MOV BYTE [DI + CTRL_TYPE], CTYPE_CHECKBOX
+    MOV BYTE [DI + CTRL_FLAGS], CTRLF_VISIBLE + CTRLF_ENABLED + CTRLF_FOCUSABLE
+    MOV BYTE [DI + CTRL_X], 1
+    MOV BYTE [DI + CTRL_Y], 2
+    MOV BYTE [DI + CTRL_W], 13
+    MOV BYTE [DI + CTRL_H], 1
+    MOV WORD [DI + CTRL_NEXT], dlg_checkbox2
+    MOV WORD [DI + CTRL_TEXT], str_repl_search_up
+    MOV BYTE [DI + CTRL_ATTR], CLR_CHECKBOX
+    MOV BYTE [DI + CTRL_FATTR], CLR_CB_FOCUS
+    MOV WORD [DI + CTRL_HANDLER], 0
+    MOV AL, [ed_find_up]
+    MOV [DI + CTRL_CB_STATE], AL
+
+    ; --- Checkbox 2: "In Selection" at row 2, x=20, width=16 ---
+    MOV DI, dlg_checkbox2
+    MOV BYTE [DI + CTRL_TYPE], CTYPE_CHECKBOX
+    MOV BYTE [DI + CTRL_X], 20
+    MOV BYTE [DI + CTRL_Y], 2
+    MOV BYTE [DI + CTRL_W], 16
+    MOV BYTE [DI + CTRL_H], 1
+    MOV WORD [DI + CTRL_NEXT], dlg_btn1
+    MOV WORD [DI + CTRL_TEXT], str_repl_in_sel
+    MOV BYTE [DI + CTRL_ATTR], CLR_CHECKBOX
+    MOV BYTE [DI + CTRL_FATTR], CLR_CB_FOCUS
+    MOV WORD [DI + CTRL_HANDLER], 0
+    ; Enable only if selection was active
+    CMP BYTE [ed_repl_has_sel], 0
+    JE .cb2_disabled
+    MOV BYTE [DI + CTRL_FLAGS], CTRLF_VISIBLE + CTRLF_ENABLED + CTRLF_FOCUSABLE
+    JMP .cb2_state
+.cb2_disabled:
+    MOV BYTE [DI + CTRL_FLAGS], CTRLF_VISIBLE
+    MOV BYTE [ed_repl_in_sel], 0
+.cb2_state:
+    MOV AL, [ed_repl_in_sel]
+    MOV [DI + CTRL_CB_STATE], AL
+
+    ; --- Find Next button at row 4, x=10, width=13 ---
+    MOV DI, dlg_btn1
+    MOV BYTE [DI + CTRL_TYPE], CTYPE_BUTTON
+    MOV BYTE [DI + CTRL_FLAGS], CTRLF_VISIBLE + CTRLF_ENABLED + CTRLF_FOCUSABLE
+    MOV BYTE [DI + CTRL_X], 10
+    MOV BYTE [DI + CTRL_Y], 4
+    MOV BYTE [DI + CTRL_W], 13
+    MOV BYTE [DI + CTRL_H], 1
+    MOV WORD [DI + CTRL_NEXT], dlg_btn2
+    MOV WORD [DI + CTRL_TEXT], str_find_next_btn
+    MOV BYTE [DI + CTRL_ATTR], CLR_BTN
+    MOV BYTE [DI + CTRL_FATTR], CLR_BTN_FOCUS
+    MOV WORD [DI + CTRL_HANDLER], dlg_handler_ok
+
+    ; --- Close button at row 4, x=25, width=9 ---
+    MOV DI, dlg_btn2
+    MOV BYTE [DI + CTRL_TYPE], CTYPE_BUTTON
+    MOV BYTE [DI + CTRL_FLAGS], CTRLF_VISIBLE + CTRLF_ENABLED + CTRLF_FOCUSABLE
+    MOV BYTE [DI + CTRL_X], 25
+    MOV BYTE [DI + CTRL_Y], 4
+    MOV BYTE [DI + CTRL_W], 9
+    MOV BYTE [DI + CTRL_H], 1
+    MOV WORD [DI + CTRL_NEXT], 0
+    MOV WORD [DI + CTRL_TEXT], str_close_btn
+    MOV BYTE [DI + CTRL_ATTR], CLR_BTN
+    MOV BYTE [DI + CTRL_FATTR], CLR_BTN_FOCUS
+    MOV WORD [DI + CTRL_HANDLER], dlg_handler_cancel
+
+    ; --- Window template ---
+    MOV DI, dlg_tmpl
+    MOV BYTE [DI + WIN_FLAGS], WINF_VISIBLE + WINF_BORDER + WINF_TITLE + WINF_SHADOW
+    MOV BYTE [DI + WIN_X], 17           ; (80-46)/2
+    MOV BYTE [DI + WIN_Y], 9            ; (25-7)/2
+    MOV BYTE [DI + WIN_W], 46
+    MOV BYTE [DI + WIN_H], 7
+    MOV BYTE [DI + WIN_ATTR], CLR_WIN_BG
+    MOV BYTE [DI + WIN_BATTR], CLR_WIN_BDR
+    MOV BYTE [DI + WIN_TATTR], CLR_WIN_TTL
+    MOV WORD [DI + WIN_TITLE], str_find_dlg_ttl
+    MOV WORD [DI + WIN_FIRST], dlg_label
+    MOV WORD [DI + WIN_FOCUS], dlg_textbox
+    MOV WORD [DI + WIN_HANDLER], 0
+    MOV BYTE [DI + WIN_ZORDER], 0
+    MOV BYTE [DI + WIN_ID], 0
+    MOV BYTE [DI + WIN_SCROLLX], 0
+    MOV BYTE [DI + WIN_SCROLLY], 0
+
+    CALL tui_dlg_run_modal
+
+    ; Save checkbox states back
+    MOV AL, [dlg_checkbox + CTRL_CB_STATE]
+    MOV [ed_find_up], AL
+    MOV AL, [dlg_checkbox2 + CTRL_CB_STATE]
+    MOV [ed_repl_in_sel], AL
+
+    PopAll
+    MOV AL, [fw_state + FW_DLG_RESULT]
+    RET
+ENDP
+
+; ----------------------------------------------------------------------------
+; editor_find - Show Find dialog with direction/selection options
 ; Uses global ed_state. Called from menu handler or Ctrl+F.
 ; ----------------------------------------------------------------------------
 editor_find: PROC
@@ -199,12 +362,24 @@ editor_find: PROC
     PUSH BX
     PUSH CX
 
-    ; Show Find dialog (single input)
-    MOV SI, str_find_prompt
-    MOV DI, str_find_dlg_ttl
-    MOV BX, ed_find_buf
-    MOV CL, 63
-    CALL tui_dlg_input
+    ; Capture selection bounds before dialog
+    MOV SI, ed_state
+    MOV BYTE [ed_repl_has_sel], 0
+    CMP WORD [SI + ED_SELANCHOR], 0FFFFh
+    JE .no_sel
+    MOV BYTE [ed_repl_has_sel], 1
+    CALL gap_cursor_offset
+    MOV BX, [SI + ED_SELANCHOR]
+    CMP AX, BX
+    JAE .sel_ordered
+    XCHG AX, BX
+.sel_ordered:
+    MOV [ed_repl_sel_start], BX
+    MOV [ed_repl_sel_end], AX
+.no_sel:
+
+    ; Show custom Find dialog
+    CALL _ed_show_find_dlg
     CMP AL, DLG_OK
     JNE .cancelled
 
@@ -213,12 +388,62 @@ editor_find: PROC
     CMP WORD [ed_find_len], 0
     JE .cancelled
 
-    ; Search forward from cursor
     MOV SI, ed_state
+
+    ; Check "In Selection" mode
+    CMP BYTE [ed_repl_in_sel], 0
+    JE .normal_search
+    CMP BYTE [ed_repl_has_sel], 0
+    JE .normal_search
+
+    ; --- In Selection search ---
+    CMP BYTE [ed_find_up], 0
+    JNE .insel_up
+
+    ; Forward in selection: move cursor to sel_start, search forward
+    MOV AX, [ed_repl_sel_start]
+    CALL gap_goto_offset
+    MOV WORD [SI + ED_SELANCHOR], 0FFFFh
     CALL _ed_find_forward
     JC .show_not_found
+    ; Verify match end <= sel_end
+    CALL gap_cursor_offset
+    CMP AX, [ed_repl_sel_end]
+    JA .insel_oob
+    CALL _ed_find_ensure_visible
+    JMP .cancelled
 
-    ; Found: ensure visible and repaint
+.insel_up:
+    ; Backward in selection: move cursor to sel_end, search backward
+    MOV AX, [ed_repl_sel_end]
+    CALL gap_goto_offset
+    MOV WORD [SI + ED_SELANCHOR], 0FFFFh
+    CALL _ed_find_backward
+    JC .show_not_found
+    ; Verify match start >= sel_start
+    MOV AX, [SI + ED_SELANCHOR]
+    CMP AX, [ed_repl_sel_start]
+    JB .insel_oob
+    CALL _ed_find_ensure_visible
+    JMP .cancelled
+
+.insel_oob:
+    ; Match fell outside selection bounds
+    MOV WORD [SI + ED_SELANCHOR], 0FFFFh
+    JMP .show_not_found
+
+.normal_search:
+    ; --- Normal search (direction-aware) ---
+    CMP BYTE [ed_find_up], 0
+    JNE .search_up
+    CALL _ed_find_forward
+    JC .show_not_found
+    CALL _ed_find_ensure_visible
+    JMP .cancelled
+
+.search_up:
+    CALL _ed_find_backward
+    JC .show_not_found
     CALL _ed_find_ensure_visible
     JMP .cancelled
 
@@ -236,9 +461,9 @@ editor_find: PROC
 ENDP
 
 ; ----------------------------------------------------------------------------
-; editor_find_next - F3: repeat last search (no dialog)
+; editor_find_next - F3: repeat last search in current direction (no dialog)
 ; If no prior search term, falls through to editor_find.
-; Uses global ed_state.
+; Uses global ed_state. Respects ed_find_up for direction.
 ; ----------------------------------------------------------------------------
 editor_find_next: PROC
     ; Check if we have a search term
@@ -253,9 +478,17 @@ editor_find_next: PROC
     CALL _ed_compute_find_len
 
     MOV SI, ed_state
+
+    CMP BYTE [ed_find_up], 0
+    JNE .search_up
     CALL _ed_find_forward
     JC .show_not_found
+    CALL _ed_find_ensure_visible
+    JMP .done
 
+.search_up:
+    CALL _ed_find_backward
+    JC .show_not_found
     CALL _ed_find_ensure_visible
     JMP .done
 

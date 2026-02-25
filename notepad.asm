@@ -106,13 +106,13 @@ handler_help_about: PROC
     ; Interior width = 29, total width = 31
     ; Lines centered within interior
 
-    ; Label 1: "DOS Notepad v1.0" (16 chars) → x = (29-16)/2 = 6
+    ; Label 1: "DOS Notepad v1.0.0" (18 chars) → x = (29-18)/2 = 5
     MOV DI, about_lbl1
     MOV BYTE [DI + CTRL_TYPE], CTYPE_LABEL
     MOV BYTE [DI + CTRL_FLAGS], CTRLF_VISIBLE
-    MOV BYTE [DI + CTRL_X], 6
+    MOV BYTE [DI + CTRL_X], 5
     MOV BYTE [DI + CTRL_Y], 1
-    MOV BYTE [DI + CTRL_W], 16
+    MOV BYTE [DI + CTRL_W], 18
     MOV BYTE [DI + CTRL_H], 1
     MOV WORD [DI + CTRL_NEXT], about_lbl2
     MOV WORD [DI + CTRL_TEXT], str_about_l1
@@ -301,7 +301,7 @@ ENDP
 str_mda_error:  DB 'This program requires a CGA, EGA, or VGA display adapter.', 0Dh, 0Ah, '$'
 str_untitled:   DB 'Untitled', 0
 str_about_title: DB 'About', 0
-str_about_l1:    DB 'DOS Notepad v1.0', 0
+str_about_l1:    DB 'DOS Notepad v1.0.1', 0
 str_about_l2:    DB 'Code by Claude Opus', 0
 str_about_l3:    DB 'Compiled using Agent86', 0
 str_about_l4:    DB 'github:cookertron/agent86', 0
@@ -590,6 +590,10 @@ _not_mda:
     CALL gap_init
     CALL undo_init
 
+    ; Zero BSS variables not covered by init routines
+    MOV WORD [ed_cliplen], 0
+    MOV WORD [ed_find_len], 0
+
     ; Check for command-line filename
     CALL _parse_cmdline
     JC _no_cmdline_file
@@ -630,39 +634,102 @@ _no_cmdline_file:
     INT 20h
 
 ; ============================================================================
-; Uninitialized Data (at end of binary)
+; BSS Layout (uninitialized data beyond end of binary)
+; ============================================================================
+; DOS allocates a full 64KB segment for .COM programs.  Memory beyond the
+; binary is available but NOT zero-filled.  All variables below are either
+; initialized by their respective init routines (tui_init, gap_init, etc.)
+; or written before first read.  Two exceptions (ed_cliplen, ed_find_len)
+; are explicitly zeroed in main startup.
+;
+; Using EQU instead of RESB avoids emitting ~42KB of zero padding that
+; would push the .COM binary past the 64KB segment limit.
 ; ============================================================================
 
-about_lbl1:     RESB CTRL_SIZE      ; About dialog label controls
-about_lbl2:     RESB CTRL_SIZE
-about_lbl3:     RESB CTRL_SIZE
-about_lbl4:     RESB CTRL_SIZE
+_bss:
 
-ed_state:       RESB ED_SIZE        ; 23 bytes - editor state struct
-ed_buffer:      RESB ED_BUFSIZE     ; 8192 bytes - text buffer
-ed_filename_buf: RESB 64            ; current filename string
-ed_filedlg_buf:  RESB 64            ; temp buffer for dialog results
-ed_clipboard:    RESB ED_BUFSIZE    ; 8192 bytes - clipboard buffer
-ed_cliplen:      RESW 1             ; clipboard content length (0 = empty)
-ed_find_buf:     RESB 64            ; search term buffer
-ed_replace_buf:  RESB 64            ; replacement text buffer
-ed_find_len:     RESW 1             ; cached search term length
-saved_cursor:    RESW 1             ; saved cursor position (DH=row, DL=col)
-saved_drive:     RESB 1             ; saved drive number (0=A, 1=B, 2=C, ...)
-saved_cwd:       RESB 65            ; saved working directory (backslash + path + null)
+; --- TUI framework (tui_data.inc) ---
+shadow_buf          EQU _bss                        ; SCR_BYTES (4000)
+fw_state            EQU shadow_buf + SCR_BYTES      ; 16
+win_table           EQU fw_state + 16               ; 320
+z_order             EQU win_table + 320             ; 16
+bdr_scratch         EQU z_order + 16                ; 7
+ctrl_dispatch_addr  EQU bdr_scratch + 7             ; 2
+mouse_state         EQU ctrl_dispatch_addr + 2      ; 16
+sb_scratch          EQU mouse_state + 16            ; 4
 
-; --- Undo/Redo data ---
-undo_buf:             RESB UNDO_BUFSIZE
-undo_head:            RESW 1
-undo_tail:            RESW 1
-undo_count:           RESW 1
+; --- Dialog scratch ---
+dlg_tmpl            EQU sb_scratch + 4              ; 20
+dlg_label           EQU dlg_tmpl + 20               ; 14
+dlg_btn1            EQU dlg_label + 14              ; 14
+dlg_btn2            EQU dlg_btn1 + 14               ; 14
+dlg_textbox         EQU dlg_btn2 + 14               ; 18
+dlg_label2          EQU dlg_textbox + 18            ; 14
+dlg_textbox2        EQU dlg_label2 + 14             ; 18
+dlg_btn3            EQU dlg_textbox2 + 18           ; 14
+dlg_checkbox        EQU dlg_btn3 + 14               ; 15
+dlg_checkbox2       EQU dlg_checkbox + 15           ; 15
 
-redo_buf:             RESB REDO_BUFSIZE
-redo_head:            RESW 1
-redo_count:           RESW 1
+; --- Dialog temp saves ---
+dlg_save_title      EQU dlg_checkbox2 + 15          ; 2
+dlg_save_buf        EQU dlg_save_title + 2          ; 2
+dlg_save_maxlen     EQU dlg_save_buf + 2            ; 1
+dlg_save_prompt2    EQU dlg_save_maxlen + 1         ; 2
+dlg_save_buf2       EQU dlg_save_prompt2 + 2        ; 2
+dlg_save_maxlen2    EQU dlg_save_buf2 + 2           ; 1
 
-undo_scratch_change:  RESW 1
-undo_scratch_cursor:  RESW 1
-undo_scratch_datalen: RESW 1
-undo_scratch_inslen:  RESW 1
-undo_from_redo:       RESB 1
+; --- File dialog ---
+dlg_listbox         EQU dlg_save_maxlen2 + 1        ; 19
+dlg_file_dta        EQU dlg_listbox + 19            ; 43
+dlg_file_path       EQU dlg_file_dta + 43           ; 65
+dlg_file_count      EQU dlg_file_path + 65          ; 1
+dlg_file_items      EQU dlg_file_count + 1          ; 256 (128 ptrs)
+dlg_file_names      EQU dlg_file_items + 256        ; 1792 (128 x 14)
+
+; --- Drive dropdown ---
+dlg_drive_dd        EQU dlg_file_names + 1792       ; 21
+dlg_drive_count     EQU dlg_drive_dd + 21           ; 1
+dlg_drive_items     EQU dlg_drive_count + 1         ; 52 (26 ptrs)
+dlg_drive_names     EQU dlg_drive_items + 52        ; 78 (26 x 3)
+
+; --- About dialog labels ---
+about_lbl1          EQU dlg_drive_names + 78        ; CTRL_SIZE (14)
+about_lbl2          EQU about_lbl1 + CTRL_SIZE
+about_lbl3          EQU about_lbl2 + CTRL_SIZE
+about_lbl4          EQU about_lbl3 + CTRL_SIZE
+
+; --- Editor data ---
+ed_state            EQU about_lbl4 + CTRL_SIZE      ; ED_SIZE (23)
+ed_buffer           EQU ed_state + ED_SIZE           ; ED_BUFSIZE (8192)
+ed_filename_buf     EQU ed_buffer + ED_BUFSIZE       ; 64
+ed_filedlg_buf      EQU ed_filename_buf + 64         ; 64
+ed_clipboard        EQU ed_filedlg_buf + 64          ; ED_BUFSIZE (8192)
+ed_cliplen          EQU ed_clipboard + ED_BUFSIZE    ; 2
+ed_find_buf         EQU ed_cliplen + 2               ; 64
+ed_replace_buf      EQU ed_find_buf + 64             ; 64
+ed_find_len         EQU ed_replace_buf + 64          ; 2
+saved_cursor        EQU ed_find_len + 2              ; 2
+saved_drive         EQU saved_cursor + 2             ; 1
+saved_cwd           EQU saved_drive + 1              ; 65
+
+; --- Undo/Redo ---
+undo_buf            EQU saved_cwd + 65               ; UNDO_BUFSIZE (4096)
+undo_head           EQU undo_buf + UNDO_BUFSIZE      ; 2
+undo_tail           EQU undo_head + 2                ; 2
+undo_count          EQU undo_tail + 2                ; 2
+redo_buf            EQU undo_count + 2               ; REDO_BUFSIZE (2048)
+redo_head           EQU redo_buf + REDO_BUFSIZE      ; 2
+redo_count          EQU redo_head + 2                ; 2
+undo_scratch_change EQU redo_count + 2               ; 2
+undo_scratch_cursor EQU undo_scratch_change + 2      ; 2
+undo_scratch_datalen EQU undo_scratch_cursor + 2     ; 2
+undo_scratch_inslen EQU undo_scratch_datalen + 2     ; 2
+undo_from_redo      EQU undo_scratch_inslen + 2      ; 1
+
+; --- Find/Replace scratch (editor_find.inc) ---
+str_repl_count_msg  EQU undo_from_redo + 1           ; 28
+
+; --- Undo selection temp (editor_undo.inc) ---
+undo_sel_tmp        EQU str_repl_count_msg + 28      ; ED_BUFSIZE (8192)
+
+_bss_end            EQU undo_sel_tmp + ED_BUFSIZE

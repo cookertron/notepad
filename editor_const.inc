@@ -52,6 +52,9 @@ EDF_SELECTING   EQU 02h         ; selection mode active (F5 toggle)
 CTRL_ED_STATE   EQU 14          ; WORD - pointer to editor state struct
 CTRL_ED_SIZE    EQU 16
 
+; --- Tab width ---
+ED_TABWIDTH     EQU 8           ; tab stop every 8 columns
+
 ; --- Editor buffer size per window ---
 ED_BUFSIZE      EQU 8192        ; 8KB per editor buffer
 

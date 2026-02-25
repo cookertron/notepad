@@ -17,16 +17,34 @@
 _gap_recalc_col: PROC
     PUSH BX
     PUSH CX
+    ; Step 1: find line start by scanning backward from GAPSTART
     MOV BX, [SI + ED_GAPSTART]
-    XOR CX, CX
-.scan:
+.find_sol:
     CMP BX, [SI + ED_BUF]
-    JE .done
+    JE .scan_fwd
     DEC BX
     CMP BYTE [BX], 0Ah
+    JE .found_lf
+    JMP .find_sol
+.found_lf:
+    INC BX                      ; BX = first byte after LF (line start)
+.scan_fwd:
+    ; Step 2: scan forward from BX to GAPSTART, computing visual column
+    XOR CX, CX                 ; CX = visual column
+.fwd_loop:
+    CMP BX, [SI + ED_GAPSTART]
     JE .done
+    CMP BYTE [BX], 09h
+    JNE .fwd_regular
+    ; TAB: advance to next tab stop = (col + 8) & FFF8h
+    ADD CX, ED_TABWIDTH
+    AND CX, 0FFF8h
+    JMP .fwd_next
+.fwd_regular:
     INC CX
-    JMP .scan
+.fwd_next:
+    INC BX
+    JMP .fwd_loop
 .done:
     MOV [SI + ED_CURCOL], CX
     POP CX
@@ -102,6 +120,13 @@ gap_insert_char: PROC
     MOV WORD [SI + ED_CURCOL], 0
     JMP .ok
 .not_nl:
+    CMP AL, 09h
+    JNE .not_tab
+    ; TAB: advance to next tab stop
+    ADD WORD [SI + ED_CURCOL], ED_TABWIDTH
+    AND WORD [SI + ED_CURCOL], 0FFF8h
+    JMP .ok
+.not_tab:
     INC WORD [SI + ED_CURCOL]
 .ok:
     OR BYTE [SI + ED_FLAGS], EDF_MODIFIED
@@ -154,6 +179,11 @@ gap_delete_back: PROC
     CALL _gap_recalc_col
     JMP .ok
 .not_nl:
+    CMP AL, 09h
+    JNE .not_tab
+    CALL _gap_recalc_col
+    JMP .ok
+.not_tab:
     DEC WORD [SI + ED_CURCOL]
 .ok:
     OR BYTE [SI + ED_FLAGS], EDF_MODIFIED
@@ -215,6 +245,11 @@ gap_move_left: PROC
     CALL _gap_recalc_col
     JMP .ok
 .not_nl:
+    CMP AL, 09h
+    JNE .not_tab
+    CALL _gap_recalc_col
+    JMP .ok
+.not_tab:
     DEC WORD [SI + ED_CURCOL]
 .ok:
     CLC
@@ -250,6 +285,13 @@ gap_move_right: PROC
     MOV WORD [SI + ED_CURCOL], 0
     JMP .ok
 .not_nl:
+    CMP AL, 09h
+    JNE .not_tab
+    ; TAB: advance to next tab stop
+    ADD WORD [SI + ED_CURCOL], ED_TABWIDTH
+    AND WORD [SI + ED_CURCOL], 0FFF8h
+    JMP .ok
+.not_tab:
     INC WORD [SI + ED_CURCOL]
 .ok:
     CLC
@@ -336,16 +378,21 @@ ENDP
 ; Input:  SI = editor state
 ; ----------------------------------------------------------------------------
 gap_home: PROC
-    PUSH CX
-    MOV CX, [SI + ED_CURCOL]
-    TEST CX, CX
-    JZ .done
+    PUSH BX
 .loop:
+    ; If at buffer start, done
+    MOV BX, [SI + ED_GAPSTART]
+    CMP BX, [SI + ED_BUF]
+    JE .done
+    ; Peek at byte before gap
+    DEC BX
+    CMP BYTE [BX], 0Ah
+    JE .done
+    ; Not at line start, move left
     CALL gap_move_left
-    DEC CX
-    JNZ .loop
+    JMP .loop
 .done:
-    POP CX
+    POP BX
     RET
 ENDP
 
@@ -378,7 +425,7 @@ gap_move_up: PROC
     JE .at_top
     PUSH BX
     PUSH CX
-    MOV CX, [SI + ED_CURCOL]
+    MOV CX, [SI + ED_CURCOL]   ; CX = target visual column
     PUSH CX
     ; Move to start of current line
     CALL gap_home
@@ -386,7 +433,7 @@ gap_move_up: PROC
     CALL gap_move_left
     ; Move to start of previous line
     CALL gap_home
-    ; Move right to target column or end of line
+    ; Move right until CURCOL >= target or end of line
     POP CX
     TEST CX, CX
     JZ .done
@@ -396,9 +443,10 @@ gap_move_up: PROC
     JAE .done
     CMP BYTE [BX], 0Ah
     JE .done
+    CMP [SI + ED_CURCOL], CX
+    JAE .done
     CALL gap_move_right
-    DEC CX
-    JNZ .seek
+    JMP .seek
 .done:
     POP CX
     POP BX
@@ -421,13 +469,13 @@ gap_move_down: PROC
     CMP CX, [SI + ED_LINECOUNT]
     JAE .at_bottom
     PUSH BX
-    MOV CX, [SI + ED_CURCOL]
+    MOV CX, [SI + ED_CURCOL]   ; CX = target visual column
     PUSH CX
     ; Move to end of current line
     CALL gap_end
     ; Move right once to cross newline into next line
     CALL gap_move_right
-    ; Move right to target column or end of line
+    ; Move right until CURCOL >= target or end of line
     POP CX
     TEST CX, CX
     JZ .done
@@ -437,9 +485,10 @@ gap_move_down: PROC
     JAE .done
     CMP BYTE [BX], 0Ah
     JE .done
+    CMP [SI + ED_CURCOL], CX
+    JAE .done
     CALL gap_move_right
-    DEC CX
-    JNZ .seek
+    JMP .seek
 .done:
     POP BX
     POP CX
