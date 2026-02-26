@@ -2,7 +2,7 @@
 
 A full-featured text editor for DOS, written in 8086 assembly. Runs in CGA text mode (80x25) on real hardware or in DOSBox-X.
 
-![DOS Notepad](assets/notepad.bmp)
+![DOS Notepad](assets/notepad.png)
 
 ## Features
 
@@ -81,3 +81,4 @@ The editor is built on a custom TUI (Text User Interface) framework providing wi
 
 - Code by Claude Opus
 - Compiled using [Agent86](https://github.com/cookertron/agent86)
+
