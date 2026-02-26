@@ -344,11 +344,13 @@ After `tui_init`, set the menu bar pointer:
     MOV WORD [fw_state + FW_MENUBAR], my_menubar
 ```
 
-Keyboard: **F10** activates the menu bar, arrow keys navigate, **Enter** opens
-a dropdown or activates an entry, **Escape** closes. **Alt+key** shortcuts
-(defined in `MI_ALTKEY`) open dropdowns directly from any state. When a dropdown
-is open, pressing a hotkey letter (defined in `MDE_HOTKEY`) activates the
-matching entry immediately (case-insensitive).
+Keyboard: **F10** or **Alt release** activates the menu bar (pressing and
+releasing Alt alone toggles the menu, matching standard Windows behavior).
+Arrow keys navigate, **Enter** opens a dropdown or activates an entry,
+**Escape** closes. **Alt+key** shortcuts (defined in `MI_ALTKEY`) open
+dropdowns directly from any state without triggering the Alt-release toggle.
+When a dropdown is open, pressing a hotkey letter (defined in `MDE_HOTKEY`)
+activates the matching entry immediately (case-insensitive).
 
 **Accelerator keys** (defined in `MDE_ACCELKEY`) are global shortcuts that
 trigger an entry's handler without opening the menu. These are dispatched when

@@ -2,6 +2,8 @@
 ; tui_event.inc - Input and Event Loop
 ; ============================================================================
 
+_tui_alt_was_down: DB 0         ; nonzero if Alt was held on previous poll
+
 ; ----------------------------------------------------------------------------
 ; tui_poll_key - Non-blocking keyboard poll using INT 21h/06h
 ; Output: If no key:        ZF=1
@@ -252,10 +254,46 @@ tui_run: PROC
     CALL tui_poll_key
     JZ .no_key
 
-    ; Got a key in AH:AL - dispatch it
+    ; Got a key — check if Alt is held during this key press
+    PUSH AX
+    MOV AH, 02h
+    INT 16h                     ; AL = shift flags
+    TEST AL, 08h                ; bit 3 = Alt held?
+    POP AX
+    JZ .key_no_alt
+    ; Alt held during key press → this is an Alt+combo, cancel tracking
+    MOV BYTE [_tui_alt_was_down], 0
+.key_no_alt:
+    ; If Alt NOT held, leave _tui_alt_was_down as-is for idle detection
     CALL tui_dispatch_key
+    JMP .poll_mouse
 
 .no_key:
+    ; --- Alt-release detection ---
+    ; Check if Alt is currently held via BIOS shift flags
+    PUSH AX
+    MOV AH, 02h
+    INT 16h                     ; AL = shift flags
+    TEST AL, 08h                ; bit 3 = Alt held
+    JZ .alt_not_held
+    ; Alt is currently held — remember it
+    MOV BYTE [_tui_alt_was_down], 1
+    JMP .alt_done
+.alt_not_held:
+    ; Alt not held — was it held before?
+    CMP BYTE [_tui_alt_was_down], 0
+    JZ .alt_done
+    ; Alt was just released with no key pressed — toggle menu
+    MOV BYTE [_tui_alt_was_down], 0
+    POP AX
+    MOV AH, KTYPE_EXTENDED
+    MOV AL, KEY_F10             ; synthesize F10 keypress
+    CALL tui_dispatch_key
+    JMP .poll_mouse
+.alt_done:
+    POP AX
+
+.poll_mouse:
     ; Poll mouse
     CALL tui_mouse_poll
     TEST AL, 3              ; any change?

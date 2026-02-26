@@ -56,11 +56,12 @@ is tracked in `WIN_FOCUS`.
 
 `tui_run` is the main loop:
 1. Poll keyboard (non-blocking via INT 21h/06h)
-2. Dispatch key to: menu handler -> control handler -> global handler
-3. Poll mouse (INT 33h/0003h)
-4. If position/button changed, dispatch mouse event
-5. If `FW_DIRTY` flag is set, recompose and blit
-6. Loop until `FW_RUNNING` == 0
+2. If key pressed: check Alt modifier via INT 16h AH=02h (cancel Alt-release tracking if Alt+combo), dispatch key
+3. If no key: detect Alt-release transition (Alt was held last poll, not held now) and synthesize F10 keypress to toggle menu bar
+4. Poll mouse (INT 33h/0003h)
+5. If position/button changed, dispatch mouse event
+6. If `FW_DIRTY` flag is set, recompose and blit
+7. Loop until `FW_RUNNING` == 0
 
 ### Handler Callbacks (RET-Trampoline)
 
@@ -85,7 +86,7 @@ Include order matters. Use `INCLUDE tui.inc` to get everything.
 | 5 | `tui_control.inc` | Control framework: draw, focus, activate, key handlers for all 9 types, scroll bars | 2572 |
 | 6 | `tui_menu.inc` | Menu bar + dropdown: draw, keyboard state machine, hotkeys, activate entry | 1068 |
 | 7 | `tui_mouse.inc` | Mouse: init, poll, cursor, hit test, dispatch, drag, resize, control click, scroll bar drag, control drag | 2252 |
-| 8 | `tui_event.inc` | Key dispatch, modal dispatch, main event loop (`tui_run`) | 276 |
+| 8 | `tui_event.inc` | Key dispatch, modal dispatch, main event loop (`tui_run`), Alt-release detection | 315 |
 | 9 | `tui_dialog.inc` | Standard dialogs: msgbox, confirm, input, input2, file selector with drive dropdown | 1277 |
 | 10 | `tui_data.inc` | Data reservations: row offsets, shadow_buf, fw_state, tables, dialog scratch, drive data | 90 |
 | 11 | `tui.inc` | Master include (includes all above in correct order) | 16 |
@@ -1046,11 +1047,16 @@ Blocks menu access and window cycling.
 
 #### `tui_run`
 Main event loop. Performs initial compose+blit, then loops: poll keyboard,
-dispatch key, poll mouse, dispatch mouse, recompose if dirty. Exits when
+dispatch key (with Alt-release detection that synthesizes F10 to toggle
+the menu bar), poll mouse, dispatch mouse, recompose if dirty. Exits when
 `FW_RUNNING` becomes 0.
 
 - **Input:** none (framework must be initialized, windows created)
 - **Output:** none (returns when `FW_RUNNING` == 0)
+- **Data:** `_tui_alt_was_down` (BYTE) — internal state tracking Alt modifier
+  for release detection. Set to 1 when Alt is held during idle polling, cleared
+  on Alt-release (after synthesizing F10) or when Alt is held during a key press
+  (Alt+combo cancels the toggle).
 
 ---
 

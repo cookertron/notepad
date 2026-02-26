@@ -337,7 +337,7 @@ str_acc_ctrl_n: DB 'Ctrl+N', 0
 str_acc_ctrl_o: DB 'Ctrl+O', 0
 str_acc_ctrl_s: DB 'Ctrl+S', 0
 str_acc_ctrl_z: DB 'Ctrl+Z', 0
-str_acc_ctrl_y: DB 'Ctrl+Y', 0
+str_acc_ctrl_y: DB 'Ctrl+Shift+Z', 0
 str_acc_ctrl_x: DB 'Ctrl+X', 0
 str_acc_ctrl_c: DB 'Ctrl+C', 0
 str_acc_ctrl_v: DB 'Ctrl+V', 0
@@ -494,7 +494,8 @@ temp_editor:
     DB 0                        ; WIN_SCROLLY
 
 ; ============================================================================
-; Parse command-line filename from PSP
+; Parse command-line from PSP — supports: NOTEPAD [/Tn] [filename]
+; /T2, /T4, /T8 set tab width; first non-flag token is filename
 ; Returns: CF=0 if filename found (copied to ed_filename_buf), CF=1 if none
 ; ============================================================================
 _parse_cmdline: PROC
@@ -506,38 +507,117 @@ _parse_cmdline: PROC
 
     MOV CL, AL
     XOR CH, CH                  ; CX = tail length
+    MOV DI, 0                   ; DI = 0 means no filename yet
 
-    ; Skip leading spaces
-.skip_spaces:
-    JCXZ .no_file               ; ran out of chars
+    ; --- Token loop: skip spaces, then process token ---
+.next_token:
+    TEST CX, CX
+    JZ .end_tokens              ; ran out of chars
     LODSB
     DEC CX
     CMP AL, 20h
-    JE .skip_spaces
+    JE .next_token              ; skip spaces
+    CMP AL, 0Dh
+    JE .end_tokens              ; CR = end of line
 
-    ; AL has first non-space char, SI points past it
-    DEC SI                      ; back up to first non-space
+    ; AL = first char of token, SI points past it
+    ; Check for /T flag
+    CMP AL, '/'
+    JE .check_flag
+
+    ; Not a flag — treat as filename if we don't have one yet
+    DEC SI                      ; back up to first char
     INC CX
+    CMP DI, 0
+    JNE .skip_token             ; already have a filename, skip this token
 
-    ; Copy filename to ed_filename_buf until space or CR
+    ; Copy filename to ed_filename_buf
     MOV DI, ed_filename_buf
 .copy_loop:
-    JCXZ .done_copy
+    TEST CX, CX
+    JZ .done_copy
     LODSB
     DEC CX
-    CMP AL, 0Dh                ; CR = end
+    CMP AL, 0Dh
     JE .done_copy
-    CMP AL, 20h                ; space = end
+    CMP AL, 20h
     JE .done_copy
     MOV [DI], AL
     INC DI
     JMP .copy_loop
-
 .done_copy:
-    ; Null-terminate
-    MOV BYTE [DI], 0
-    ; Check if we actually copied anything
-    CMP DI, ed_filename_buf
+    MOV BYTE [DI], 0           ; null-terminate
+    JMP .next_token
+
+.skip_token:
+    ; Advance past this token
+    TEST CX, CX
+    JZ .end_tokens
+    LODSB
+    DEC CX
+    CMP AL, 20h
+    JE .next_token
+    CMP AL, 0Dh
+    JE .end_tokens
+    JMP .skip_token
+
+.check_flag:
+    ; We saw '/'. Next char should be T or t
+    TEST CX, CX
+    JZ .end_tokens
+    LODSB
+    DEC CX
+    CMP AL, 'T'
+    JE .parse_tab
+    CMP AL, 't'
+    JE .parse_tab
+    ; Unknown flag — skip rest of token
+    JMP .skip_flag_rest
+
+.parse_tab:
+    ; Next char is the digit: 2, 4, or 8
+    TEST CX, CX
+    JZ .end_tokens
+    LODSB
+    DEC CX
+    CMP AL, '2'
+    JE .tab_2
+    CMP AL, '4'
+    JE .tab_4
+    CMP AL, '8'
+    JE .tab_8
+    ; Invalid digit — ignore, skip rest of token
+    JMP .skip_flag_rest
+
+.tab_2:
+    MOV WORD [ed_tw], 2
+    MOV WORD [ed_tm], 0FFFEh
+    JMP .skip_flag_rest
+.tab_4:
+    MOV WORD [ed_tw], 4
+    MOV WORD [ed_tm], 0FFFCh
+    JMP .skip_flag_rest
+.tab_8:
+    MOV WORD [ed_tw], 8
+    MOV WORD [ed_tm], 0FFF8h
+
+.skip_flag_rest:
+    ; Advance past any remaining chars in this token
+    TEST CX, CX
+    JZ .end_tokens
+    LODSB
+    DEC CX
+    CMP AL, 20h
+    JE .next_token
+    CMP AL, 0Dh
+    JE .end_tokens
+    JMP .skip_flag_rest
+
+.end_tokens:
+    ; Check if we found a filename
+    CMP DI, 0
+    JE .no_file
+    CMP DI, ed_filename_buf     ; DI still at start means empty copy
     JE .no_file
     CLC                         ; CF=0: filename found
     RET

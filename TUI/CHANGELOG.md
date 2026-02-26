@@ -451,6 +451,24 @@ handle exit themselves (e.g., via a menu entry or control handler that sets
 
 ---
 
+## Alt-Release Menu Activation
+
+Added Alt key release detection to activate the menu bar, matching standard
+Windows behavior. Pressing and releasing Alt alone toggles the menu bar
+(equivalent to F10). Alt+letter shortcuts (Alt+F, Alt+E, etc.) continue to
+open dropdowns directly without triggering the toggle.
+
+**Added:**
+- `_tui_alt_was_down` (BYTE) — state variable tracking whether Alt was held on the previous poll cycle
+- Alt-release detection logic in `tui_run` event loop:
+  - Idle path: if Alt is held, sets tracker; when Alt is released with no key pressed, synthesizes F10 keypress to toggle menu
+  - Key-pressed path: if Alt is held during a key press (Alt+combo), clears tracker to prevent false toggle
+- Uses INT 16h AH=02h to read BIOS shift flags (bit 3 = Alt)
+
+**Files modified:** `tui_event.inc`
+
+---
+
 ## Phase 14 — CTYPE_EDITOR Dispatch in TUI Framework
 
 Extended the TUI control dispatch to support `CTYPE_EDITOR` (9), an

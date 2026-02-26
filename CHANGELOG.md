@@ -5,6 +5,22 @@ All notable changes to DOS Notepad will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-02-26
+
+### Added
+- Configurable TAB size via `/T` command-line flag: `NOTEPAD /T4 FILE.TXT`
+  - Supported values: `/T2` (2-column stops), `/T4` (4-column stops), `/T8` (default 8-column stops)
+  - Flag can appear before or after the filename
+  - Affects display, cursor movement, mouse click positioning, and typing
+- Alt key release toggles the menu bar (same as F10), matching standard Windows behavior
+  - Press and release Alt alone to activate the menu bar
+  - Press Alt again to deactivate
+  - Alt+letter shortcuts (Alt+F, Alt+E, etc.) still open dropdowns directly
+
+### Changed
+- Command-line parser refactored from single-token to multi-token, supporting flags and filename in any order
+- TAB stop constants replaced with runtime variables (`ed_tw`/`ed_tm`) for configurable width
+
 ## [1.0.1] - 2026-02-25
 
 ### Fixed
